@@ -304,7 +304,7 @@ struct ThreeLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
 
   # derived params
     "the reduced gravity constants for the fluid interface"
-        g′ :: T
+        g′ :: Tuple
     "array containing ``x``-gradient of PV due to topographic PV in each fluid layer"
         Qx :: Aphys3D
     "array containing ``y``-gradient of PV due to ``β``, ``U``, and topographic PV in each fluid layer"
