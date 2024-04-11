@@ -111,14 +111,14 @@ function Problem(nlayers::Int,                             # number of fluid lay
              aliased_fraction = 1/3,
                             T = Float64)
 
-  if dev == GPU() && nlayers > 2
+  if dev == GPU() && nlayers > 3
     @warn """MultiLayerQG module is not optimized on the GPU yet for configurations with
-    3 fluid layers or more!
+    4 fluid layers or more!
 
     See issues on Github at https://github.com/FourierFlows/GeophysicalFlows.jl/issues/112
     and https://github.com/FourierFlows/GeophysicalFlows.jl/issues/267.
 
-    To use MultiLayerQG with 3 fluid layers or more we suggest, for now, to restrict running
+    To use MultiLayerQG with 4 fluid layers or more we suggest, for now, to restrict running
     on CPU."""
   end
 
@@ -270,6 +270,49 @@ struct TwoLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
   rfftplan :: Trfft
 end
 
+"""
+    struct ThreeLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
+
+The parameters for a three-layer `MultiLayerQG` problem.
+
+$(TYPEDFIELDS)
+"""
+struct ThreeLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
+  # prescribed params
+    "constant planetary vorticity"
+        f₀ :: T
+    "planetary vorticity ``y``-gradient"
+         β :: T
+    "array with Boussinesq buoyancy of each fluid layer"
+         b :: Tuple
+    "tuple with rest height of each fluid layer"
+         H :: Tuple
+   "array with imposed constant zonal flow ``U(y)`` in each fluid layer"
+         U :: Aphys3D
+   "array containing periodic component of the topographic PV"
+       eta :: Aphys2D
+    "tuple containing the ``(x, y)`` components of topographic PV large-scale gradient"
+    topographic_pv_gradient :: Tuple{T, T}
+    "linear bottom drag coefficient"
+         μ :: T
+    "small-scale (hyper)-viscosity coefficient"
+         ν :: T
+    "(hyper)-viscosity order, `nν```≥ 1``"
+        nν :: Int
+    "function that calculates the Fourier transform of the forcing, ``F̂``"
+   calcFq! :: Function
+
+  # derived params
+    "the reduced gravity constants for the fluid interface"
+        g′ :: T
+    "array containing ``x``-gradient of PV due to topographic PV in each fluid layer"
+        Qx :: Aphys3D
+    "array containing ``y``-gradient of PV due to ``β``, ``U``, and topographic PV in each fluid layer"
+        Qy :: Aphys3D
+    "rfft plan for FFTs"
+  rfftplan :: Trfft
+end
+
 function convert_U_to_U3D(dev, nlayers, grid, U::AbstractArray{TU, 1}) where TU
   T = eltype(grid)
 
@@ -368,7 +411,9 @@ function Params(nlayers::Int, f₀, β, b, H, U, eta, topographic_pv_gradient, �
 
     if nlayers==2
       return TwoLayerParams(T(f₀), T(β), Tuple(T.(b)), Tuple(T.(H)), U, eta, topographic_pv_gradient, T(μ), T(ν), nν, calcFq, T(g′[1]), Qx, Qy, rfftplanlayered)
-    else # if nlayers>2
+    elseif nlayers==3
+      return ThreeLayerParams(T(f₀), T(β), Tuple(T.(b)), Tuple(T.(H)), U, eta, topographic_pv_gradient, T(μ), T(ν), nν, calcFq, Tuple(T.(g′)), Qx, Qy, rfftplanlayered)
+    else # if nlayers>3
       return Params(nlayers, T(f₀), T(β), Tuple(T.(b)), T.(H), U, eta, topographic_pv_gradient, T(μ), T(ν), nν, calcFq, Tuple(T.(g′)), Qx, Qy, S, S⁻¹, rfftplanlayered)
     end
   end
@@ -377,6 +422,7 @@ end
 numberoflayers(params) = params.nlayers
 numberoflayers(::SingleLayerParams) = 1
 numberoflayers(::TwoLayerParams) = 2
+numberoflayers(::ThreeLayerParams) = 3
 
 # ---------
 # Equations
@@ -588,6 +634,39 @@ function pvfromstreamfunction!(qh, ψh, params::TwoLayerParams, grid)
 end
 
 """
+    pvfromstreamfunction!(qh, ψh, params::ThreeLayerParams, grid)
+
+Obtain the Fourier transform of the PV from the streamfunction `ψh` for the special
+case of a three fluid layer configuration. In this case we have,
+
+```math
+q̂₁ = - k² ψ̂₁ + f₀² / (g′₁ H₁) (ψ̂₂ - ψ̂₁) ,
+```
+
+```math
+q̂₂ = - k² ψ̂₂ + f₀² / (g′₁ H₂) (ψ̂₁ - ψ̂₂) + f₀² / (g′₂ H₂) (ψ̂₃ - ψ̂₂) ,
+```
+
+```math
+q̂₃ = - k² ψ̂₃ + f₀² / (g′₂ H₃) (ψ̂₂ - ψ̂₃) .
+```
+
+(Here, the PV-streamfunction relationship is hard-coded to avoid scalar operations
+on the GPU.)
+"""
+function pvfromstreamfunction!(qh, ψh, params::ThreeLayerParams, grid)
+  f₀, g′₁, g′₂, H₁, H₂, H₃ = params.f₀, params.g′[1], params.g′[2], params.H[1], params.H[2], params.H[3]
+
+  ψ1h, ψ2h, ψ3h = view(ψh, :, :, 1), view(ψh, :, :, 2), view(ψh, :, :, 3)
+
+  @views @. qh[:, :, 1] = - grid.Krsq * ψ1h + f₀^2 / (g′₁ * H₁) * (ψ2h -  ψ1h)
+  @views @. qh[:, :, 2] = - grid.Krsq * ψ2h + f₀^2 / (g′₁ * H₂) * (ψ1h - ψ2h) + f₀^2 / (g′₂ * H₂) * (ψ3h - ψ2h)
+  @views @. qh[:, :, 3] = - grid.Krsq * ψ3h + f₀^2 / (g′₂ * H₃) * (ψ2h -  ψ3h)
+
+  return nothing
+end
+
+"""
     streamfunctionfrompv!(ψh, qh, params, grid)
 
 Invert the PV to obtain the Fourier transform of the streamfunction `ψh` in each layer from
@@ -642,6 +721,61 @@ function streamfunctionfrompv!(ψh, qh, params::TwoLayerParams, grid)
 
   for j in 1:2
     @views @. ψh[:, :, j] *= grid.invKrsq / (grid.Krsq + f₀^2 / g′ * (H₁ + H₂) / (H₁ * H₂))
+  end
+
+  return nothing
+end
+
+"""
+    streamfunctionfrompv!(ψh, qh, params::ThreeLayerParams, grid)
+
+Invert the PV to obtain the Fourier transform of the streamfunction `ψh` for the special
+case of a three fluid layer configuration. In this case we have,
+
+```math
+ψ̂₁ = {[k⁴  + f₀²(1 / g′₁H₂ + 1 / g′₂H₂ + 1 / g′₂H₃) k² + f₀⁴ / g′₁g′₂H₂H₃] q̂₁ 
+    + [f₀² / g′₁H₁ k² +  f₀⁴ / g′₁g′₂H₁H₃] q̂₂ 
+    + f₀⁴ / g′₁g′₂H₁H₂ q̂₃} / Δ ,
+```
+
+```math
+ψ̂₂ = {[f₀² / g′₁H₂ k² +  f₀⁴ / g′₁g′₂H₂H₃] q̂₁ 
+    + [k⁴  + f₀²(1 / g′₁H₁ + 1 / g′₂H₃) k² + f₀⁴ / g′₁g′₂H₁H₃] q̂₂ 
+    + [f₀² / g′₂H₂ k² +  f₀⁴ / g′₁g′₂H₁H₂] q̂₃} / Δ ,
+```
+
+```math
+ψ̂₃ = {f₀⁴ / g′₁g′₂H₂H₃ q̂₁ 
+    + [f₀² / g′₂H₃ k² +  f₀⁴ / g′₁g′₂H₁H₃] q̂₂ 
+    + [k⁴  + f₀²(1 / g′₁H₁ + 1 / g′₁H₂ + 1 / g′₂H₂) k² + f₀⁴ / g′₁g′₂H₁H₂] q̂₃} / Δ ,
+```
+
+where ``Δ = -k² [k⁴ + f₀² (1 / g′₁H₁ + 1 / g′₁H₂ + 1 / g′₂H₂ + 1 / g′₂H₃) k² + f₀⁴ / g′₁g′₂ (1 / H₁H₂ + 1 / H₁H₃ + 1 / H₂H₃)]``.
+
+(Here, the PV-streamfunction relationship is hard-coded to avoid scalar operations
+on the GPU.)
+"""
+function streamfunctionfrompv!(ψh, qh, params::ThreeLayerParams, grid)
+  f₀, g′₁, g′₂, H₁, H₂, H₃ = params.f₀, params.g′[1], params.g′[2], params.H[1], params.H[2], params.H[3]
+
+  q1h, q2h, q3h = view(qh, :, :, 1), view(qh, :, :, 2), view(qh, :, :, 3)
+
+  @views @. ψh[:, :, 1] = (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₂) + 1 / (g′₂ * H₂) + 1 / (g′₂ * H₃)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h + 
+                          (f₀^2 / (g′₁ * H₁) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h + 
+                          (f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+
+  @views @. ψh[:, :, 2] = (f₀^2 / (g′₁ * H₂) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h +
+                          (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₂ * H₃)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h +
+                          (f₀^2 / (g′₂ * H₂) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+
+  @views @. ψh[:, :, 3] = (f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h +
+                          (f₀^2 / (g′₂ * H₃) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h +
+                          (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₁ * H₂) + 1 / (g′₂ * H₂)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+
+  for j in 1:3
+    @views @. ψh[:, :, j] *= - grid.invKrsq / (grid.Krsq^2 
+                                                + f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₁ * H₂) + 1 / (g′₂ * H₂) + 1 / (g′₂ * H₃)) * grid.Krsq 
+                                                + f₀^4 / (g′₁ * g′₂) * (1 / (H₁ * H₂) + 1 / (H₁ * H₃) + 1 / (H₂ * H₃)))
   end
 
   return nothing
