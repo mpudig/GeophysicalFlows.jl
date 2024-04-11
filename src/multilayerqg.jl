@@ -658,10 +658,11 @@ function pvfromstreamfunction!(qh, ψh, params::ThreeLayerParams, grid)
   f₀, g′₁, g′₂, H₁, H₂, H₃ = params.f₀, params.g′[1], params.g′[2], params.H[1], params.H[2], params.H[3]
 
   ψ1h, ψ2h, ψ3h = view(ψh, :, :, 1), view(ψh, :, :, 2), view(ψh, :, :, 3)
+  q1h, q2h, q3h = view(qh, :, :, 1), view(qh, :, :, 2), view(qh, :, :, 3) 
 
-  @views @. qh[:, :, 1] = - grid.Krsq * ψ1h + f₀^2 / (g′₁ * H₁) * (ψ2h -  ψ1h)
-  @views @. qh[:, :, 2] = - grid.Krsq * ψ2h + f₀^2 / (g′₁ * H₂) * (ψ1h - ψ2h) + f₀^2 / (g′₂ * H₂) * (ψ3h - ψ2h)
-  @views @. qh[:, :, 3] = - grid.Krsq * ψ3h + f₀^2 / (g′₂ * H₃) * (ψ2h -  ψ3h)
+  q1h = - grid.Krsq .* ψ1h + f₀^2 / (g′₁ * H₁) .* (ψ2h .- ψ1h)
+  q2h = - grid.Krsq .* ψ2h + f₀^2 / (g′₁ * H₂) .* (ψ1h .- ψ2h) + f₀^2 / (g′₂ * H₂) .* (ψ3h .- ψ2h)
+  q3h = - grid.Krsq .* ψ3h + f₀^2 / (g′₂ * H₃) .* (ψ2h .- ψ3h)
 
   return nothing
 end
@@ -758,19 +759,20 @@ on the GPU.)
 function streamfunctionfrompv!(ψh, qh, params::ThreeLayerParams, grid)
   f₀, g′₁, g′₂, H₁, H₂, H₃ = params.f₀, params.g′[1], params.g′[2], params.H[1], params.H[2], params.H[3]
 
+  ψ1h, ψ2h, ψ3h = view(ψh, :, :, 1), view(ψh, :, :, 2), view(ψh, :, :, 3)
   q1h, q2h, q3h = view(qh, :, :, 1), view(qh, :, :, 2), view(qh, :, :, 3)
 
-  @views @. ψh[:, :, 1] = (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₂) + 1 / (g′₂ * H₂) + 1 / (g′₂ * H₃)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h + 
-                          (f₀^2 / (g′₁ * H₁) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h + 
-                          (f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+  ψ1h = (grid.Krsq.^2 .+ f₀^2 * (1 / (g′₁ * H₂) .+ 1 / (g′₂ * H₂) + 1 / (g′₂ * H₃)) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) .* q1h .+ 
+                          (f₀^2 / (g′₁ * H₁) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) .* q2h .+ 
+                          (f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) .* q3h
 
-  @views @. ψh[:, :, 2] = (f₀^2 / (g′₁ * H₂) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h +
-                          (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₂ * H₃)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h +
-                          (f₀^2 / (g′₂ * H₂) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+  ψ2h = (f₀^2 / (g′₁ * H₂) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) .* q1h +
+                          (grid.Krsq.^2 .+ f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₂ * H₃)) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) .* q2h .+
+                          (f₀^2 / (g′₂ * H₂) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) .* q3h
 
-  @views @. ψh[:, :, 3] = (f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) * q1h +
-                          (f₀^2 / (g′₂ * H₃) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) * q2h +
-                          (grid.Krsq^2 + f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₁ * H₂) + 1 / (g′₂ * H₂)) * grid.Krsq + f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) * q3h
+  ψ3h = (f₀^4 / (g′₁ * g′₂ * H₂ * H₃)) .* q1h .+
+                          (f₀^2 / (g′₂ * H₃) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₁ * H₃)) .* q2h .+
+                          (grid.Krsq.^2 .+ f₀^2 * (1 / (g′₁ * H₁) + 1 / (g′₁ * H₂) + 1 / (g′₂ * H₂)) .* grid.Krsq .+ f₀^4 / (g′₁ * g′₂ * H₁ * H₂)) .* q3h
 
   for j in 1:3
     @views @. ψh[:, :, j] *= - grid.invKrsq / (grid.Krsq^2 
