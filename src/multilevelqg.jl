@@ -247,9 +247,9 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
 H = Tuple(T.(H))
 
 δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
-@views δ[1] = 0.5 * (H[1] + H[2])
+CUDA.@allowscalar δ[1] = 0.5 * (H[1] + H[2])
 @views @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
-@views δ[end] = 0.5 * (H[end - 1] + H[end])
+CUDA.@allowscalar δ[end] = 0.5 * (H[end - 1] + H[end])
 
 Fm = @. T(f₀^2 / (N² * δ * H[2 : nlevels]))      # PV stretching part
 Fp = @. T(f₀^2 / (N² * δ * H[1 : nlevels - 1]))  # PV stretching part
@@ -538,10 +538,10 @@ relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_
 """
 function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
-  F[1, 1] = Fup
-  F[1, 2] = -Fup
-  F[end, end - 1] = Flo
-  F[end, end] = -Flo
+  CUDA.@allowscalar F[1, 1] = Fup
+  CUDA.@allowscalar F[1, 2] = -Fup
+  CUDA.@allowscalar F[end, end - 1] = Flo
+  CUDA.@allowscalar F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n]
@@ -560,10 +560,10 @@ that relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``ψ̂_𝐤 =
 """
 function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
-  F[1, 1] = Fup
-  F[1, 2] = -Fup
-  F[end, end - 1] = Flo
-  F[end, end] = -Flo
+  CUDA.@allowscalar F[1, 1] = Fup
+  CUDA.@allowscalar F[1, 2] = -Fup
+  CUDA.@allowscalar F[end, end - 1] = Flo
+  CUDA.@allowscalar F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
