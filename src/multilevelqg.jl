@@ -235,11 +235,12 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
 
   # Add everything to background generalized PV gradients, except part coming from vertical shear   
   Qx = zeros(dev, T, (nx, ny, nlevels + 2))
-  @views @. Qx[:, :, end] += N²[end] .* etax
+  @views @. Qx[:, :, end] += N²[end] * etax
 
   Qy = zeros(dev, T, (nx, ny, nlevels + 2))
-  @views @. Qy[:, :, 2 : end - 1] = T(β) .- Uyy  # T(β) ensures that Qy remains same type as U
-  @views @. Qy[:, :, end] += N²[end] .* etay
+  β_T = T(β) # T(β) ensures that Qy remains same type as U
+  @views @. Qy[:, :, 2 : end - 1] = β_T - Uyy 
+  @views @. Qy[:, :, end] += N²[end] * etay
 
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
 
