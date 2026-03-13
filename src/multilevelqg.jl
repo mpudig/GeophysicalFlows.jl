@@ -29,7 +29,7 @@ using KernelAbstractions.Extras.LoopInfo: @unroll
 nothingfunction(args...) = nothing
 
 """
-    Problem(nlayers :: Int,
+    Problem(nlevels :: Int,
                         dev = CPU();
                          nx = 128,
                          ny = nx,
@@ -37,11 +37,11 @@ nothingfunction(args...) = nothing
                          Ly = Lx,
                          f₀ = 1.0,
                           β = 0.0,
-                          U = zeros(nlayers),
-                          H = 1/nlayers * ones(nlayers),
-                          b = -(1 .+ 1/nlayers * (0:nlayers-1)),
+                          U = zeros(nlevels + 2),
+                          H = 1/nlevels * ones(nlevels),
+                          N² = -(1 .+ 1/nlevels+1 * (0:nlevels+1)),
                         eta = nothing,
-    topographic_pv_gradient = (0, 0),
+    topographic_gradient = (0, 0),
                           μ = 0,
                           ν = 0,
                          nν = 1,
@@ -53,11 +53,11 @@ nothingfunction(args...) = nothing
            aliased_fraction = 1/3,
                           T = Float64)
 
-Construct a multi-layer quasi-geostrophic problem with `nlayers` fluid layers on device `dev`.
+Construct a multi-level quasi-geostrophic problem with `nlevels` interior levels on device `dev`.
 
 Arguments
 =========
-- `nlayers`: (required) Number of fluid layers.
+- `nlevels`: (required) Number of interior levels.
 - `dev`: (required) `CPU()` (default) or `GPU()`; computer architecture used to time-step `problem`.
 
 Keyword arguments
@@ -68,11 +68,11 @@ Keyword arguments
   - `Ly`: Extent of the ``y``-domain.
   - `f₀`: Constant planetary vorticity.
   - `β`: Planetary vorticity ``y``-gradient.
-  - `U`: Imposed background constant zonal flow ``U(y)`` in each fluid layer.
-  - `H`: Rest height of each fluid layer.
-  - `b`: Boussinesq buoyancy of each fluid layer.
-  - `eta`: Periodic component of the topographic potential vorticity.
-  - `topographic_pv_gradient`: The ``(x, y)`` components of the topographic PV large-scale gradient.
+  - `U`: Imposed background constant zonal flow ``U(y)`` at each level (upper surface level, interior levels, and lower surface level).
+  - `H`: Rest height between half-index levels.
+  - `N²`: Background buoyancy frequency at half-index levels.
+  - `eta`: Periodic component of the bathymetry.
+  - `topographic_gradient`: The ``(x, y)`` components of the topographic large-scale gradient.
   - `μ`: Linear bottom drag coefficient.
   - `ν`: Small-scale (hyper)-viscosity coefficient.
   - `nν`: (Hyper)-viscosity order, `nν```≥ 1``.
@@ -84,7 +84,7 @@ Keyword arguments
   - `aliased_fraction`: the fraction of high wavenumbers that are zero-ed out by `dealias!()`.
   - `T`: `Float32` or `Float64` (default); floating point type used for `problem` data.
 """
-function Problem(nlayers::Int,                                     # number of fluid layers
+function Problem(nlevels::Int,                                     # number of interior levels
                           dev = CPU();
               # Numerical parameters
                            nx = 128,
@@ -94,11 +94,11 @@ function Problem(nlayers::Int,                                     # number of f
               # Physical parameters
                            f₀ = 1.0,                               # Coriolis parameter
                             β = 0.0,                               # y-gradient of Coriolis parameter
-                            U = zeros(nlayers),                    # imposed zonal flow U(y) in each layer
-                            H = 1/nlayers * ones(nlayers),         # rest height of each layer
-                            b = -(1 .+ 1/nlayers * (0:nlayers-1)), # Boussinesq buoyancy of each layer
-                          eta = nothing,                           # periodic component of the topographic PV
-      topographic_pv_gradient = (0, 0),                            # tuple with the ``(x, y)`` components of topographic PV large-scale gradient
+                            U = zeros(nlevels + 2),                # imposed zonal flow U(y) at each level
+                            H = 1/nlevels * ones(nlevels),         # rest height between half-index levels
+                            N² = 1/nlevels^2 * ones(nlevels + 1),  # Background buoyancy frequency at half-index levels
+                          eta = nothing,                           # periodic component of the bathymetry
+      topographic_gradient = (0, 0),                               # tuple with the ``(x, y)`` components of topographic large-scale gradient
               # Bottom Drag and/or (hyper)-viscosity
                             μ = 0,
                             ν = 0,
@@ -113,19 +113,12 @@ function Problem(nlayers::Int,                                     # number of f
              aliased_fraction = 1/3,
                             T = Float64)
 
-  if nlayers == 1
-    @warn """MultiLayerQG module does work for single-layer configuration but may not be as
-    optimized. We suggest using SingleLayerQG module for single-layer QG simulation unless
-    you have reasons to use MultiLayerQG in a single-layer configuration, e.g., you want to
-    compare solutions with varying number of fluid layers."""
-  end
-
-  # topographic PV
+  # bathymetry
   eta === nothing && (eta = zeros(dev, T, (nx, ny)))
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlayers, f₀, β, b, H, U, eta, topographic_pv_gradient, μ, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, N², H, U, eta, topographic_gradient, μ, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -137,28 +130,28 @@ end
 """
     struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
 
-The parameters for the `MultiLayerQG` problem.
+The parameters for the `MultiLevelQG` problem.
 
 $(TYPEDFIELDS)
 """
 struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   # prescribed params
-    "number of fluid layers"
-   nlayers :: Int
+    "number of interior levels"
+   nlevels :: Int
     "constant planetary vorticity"
         f₀ :: T
     "planetary vorticity ``y``-gradient"
          β :: T
-    "tuple with Boussinesq buoyancy of each fluid layer"
-         b :: Tuple
-    "tuple with rest height of each fluid layer"
+    "tuple with background buoyancy frequency at half-index levels"
+         N² :: Tuple
+    "tuple with rest height between half-index levels"
          H :: Tuple
-    "array with imposed constant zonal flow ``U(y)`` in each fluid layer"
+    "array with imposed constant zonal flow ``U(y)`` in at each level (surfaces and interior levels)"
          U :: Aphys3D
-    "array containing the topographic PV"
+    "array containing the bathymetry"
        eta :: Aphys2D
-    "tuple containing the ``(x, y)`` components of topographic PV large-scale gradient"
-    topographic_pv_gradient :: Tuple{T, T}
+    "tuple containing the ``(x, y)`` components of topographic large-scale gradient"
+    topographic_gradient :: Tuple{T, T}
     "linear bottom drag coefficient"
          μ :: T
     "small-scale (hyper)-viscosity coefficient"
@@ -169,11 +162,9 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
    calcFq! :: Function
 
   # derived params
-    "tuple with the reduced gravity constants for each fluid interface"
-        g′ :: Tuple
-    "array containing ``x``-gradient of PV due to eta in each fluid layer"
+    "array containing ``x``-gradient of generalized PV due to topographic PV at upper surface, lower surface and interior levels"
         Qx :: Aphys3D
-    "array containing ``y``-gradient of PV due to ``β``, ``U``, and topographic PV in each fluid layer"
+    "array containing ``y``-gradient of generalzied PV due to ``β``, ``U``, and topographic PV at upper surface, lower surface and interior levels"
         Qy :: Aphys3D
     "array containing coefficients for getting PV from streamfunction"
          S :: Atrans4D
@@ -183,46 +174,11 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   rfftplan :: Trfft
 end
 
-"""
-    struct SingleLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
-
-The parameters for a single-layer `MultiLayerQG` problem.
-
-$(TYPEDFIELDS)
-"""
-struct SingleLayerParams{T, Aphys3D, Aphys2D, Trfft} <: AbstractParams
-  # prescribed params
-    "planetary vorticity ``y``-gradient"
-         β :: T
-    "array with imposed constant zonal flow ``U(y)``"
-         U :: Aphys3D
-     "array containing the periodic component of the topographic PV"
-       eta :: Aphys2D
-    "tuple containing the ``(x, y)`` components of topographic PV large-scale gradient"
-    topographic_pv_gradient :: Tuple{T, T}
-    "linear drag coefficient"
-         μ :: T
-    "small-scale (hyper)-viscosity coefficient"
-         ν :: T
-    "(hyper)-viscosity order, `nν```≥ 1``"
-        nν :: Int
-    "function that calculates the Fourier transform of the forcing, ``F̂``"
-   calcFq! :: Function
-
-  # derived params
-    "array containing ``x``-gradient of PV due to topographic PV"
-        Qx :: Aphys3D
-    "array containing ``y``-gradient of PV due to ``β``, ``U``, and topographic PV"
-        Qy :: Aphys3D
-    "rfft plan for FFTs"
-  rfftplan :: Trfft
-end
-
-function convert_U_to_U3D(dev, nlayers, grid, U::AbstractArray{TU, 1}) where TU
+function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 1}) where TU
   T = eltype(grid)
 
-  if length(U) == nlayers
-    U_2D = zeros(dev, T, (1, nlayers))
+  if length(U) == nlevels + 2
+    U_2D = zeros(dev, T, (1, nlevels + 2))
     U_2D[:] = U
     U_2D = repeat(U_2D, outer=(grid.ny, 1))
   else
@@ -230,97 +186,100 @@ function convert_U_to_U3D(dev, nlayers, grid, U::AbstractArray{TU, 1}) where TU
     U_2D[:] = U
   end
 
-  U_3D = zeros(dev, T, (1, grid.ny, nlayers))
+  U_3D = zeros(dev, T, (1, grid.ny, nlevels + 2))
   @views U_3D[1, :, :] = U_2D
 
   return U_3D
 end
 
-function convert_U_to_U3D(dev, nlayers, grid, U::AbstractArray{TU, 2}) where TU
+function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 2}) where TU
   T = eltype(grid)
-  U_3D = zeros(dev, T, (1, grid.ny, nlayers))
+  U_3D = zeros(dev, T, (1, grid.ny, nlevels + 2))
   @views U_3D[1, :, :] = U
 
   return U_3D
 end
 
-function convert_U_to_U3D(dev, nlayers, grid, U::Number)
+function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   T = eltype(grid)
   A = device_array(dev)
-  U_3D = reshape(repeat([T(U)], outer=(grid.ny, 1)), (1, grid.ny, nlayers))
+  U_3D = reshape(repeat([T(U)], outer=(grid.ny, 1)), (1, grid.ny, nlevels + 2))
 
   return A(U_3D)
 end
 
-function Params(nlayers::Int, f₀, β, b, H, U, eta, topographic_pv_gradient, μ, ν, nν, grid::TwoDGrid;
+function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, μ, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
   A = device_array(dev)
 
-   ny, nx = grid.ny , grid.nx
+  ny, nx = grid.ny, grid.nx
   nkr, nl = grid.nkr, grid.nl
-   kr, l  = grid.kr , grid.l
+  kr, l  = grid.kr, grid.l
 
-    U = convert_U_to_U3D(dev, nlayers, grid, U)
+  U = convert_U_to_U3D(dev, nlevels, grid, U)
 
-  Uyy = real.(ifft(-l.^2 .* fft(U)))
+  Uyy = real.(ifft(-l.^2 .* fft(U[:,:,2:nlevels+1]))) # only calculate curvature of shear for interior PV part
   Uyy = CUDA.@allowscalar repeat(Uyy, outer=(nx, 1, 1))
 
-  # Calculate the periodic components of the topographic PV gradients
+  # Calculate the periodic components of the bathymetry gradients
   etah = rfft(A(eta))
   etax = irfft(im * kr .* etah, nx)   # ∂η/∂x
   etay = irfft(im * l  .* etah, nx)   # ∂η/∂y
 
-  # Add large-scale topographic PV gradient
-  topographic_pv_gradient = T.(topographic_pv_gradient)
-  @. etax += topographic_pv_gradient[1]
-  @. etay += topographic_pv_gradient[2]
+  # Add large-scale topographic gradient
+  topographic_gradient = T.(topographic_gradient)
+  @. etax += topographic_gradient[1]
+  @. etay += topographic_gradient[2]
 
-  Qx = zeros(dev, T, (nx, ny, nlayers))
-  @views @. Qx[:, :, nlayers] += etax
+  # Add everything to background generalized PV gradients, except part coming from vertical shear   
+  Qx = zeros(dev, T, (nx, ny, nlevels + 2))
+  @views @. Qx[:, :, end] += N²[end] .* etax
 
-  Qy = zeros(dev, T, (nx, ny, nlayers))
-  Qy = T(β) .- Uyy  # T(β) ensures that Qy remains same type as U
-  @views @. Qy[:, :, nlayers] += etay
+  Qy = zeros(dev, T, (nx, ny, nlevels + 2))
+  @views @. Qy[:, :, 2 : nlevels + 1] = T(β) .- Uyy  # T(β) ensures that Qy remains same type as U
+  @views @. Qy[:, :, end] += N²[end] .* etay
 
-  rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlayers), [1, 2]; flags=effort)
+  rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
 
-  if nlayers==1
-    return SingleLayerParams(T(β), U, eta, topographic_pv_gradient, T(μ), T(ν), nν, calcFq, Qx, Qy, rfftplanlayered)
+H = Tuple(T.(H))
 
-  else # if nlayers≥2
+δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
+@views δ[1] = 0.5 * (H[1] + H[2])
+@views @. δ[2:end-1] = 0.5 * (H[1:end-1] + H[2:end])
+@views δ[end] = 0.5 * (H[end-1] + H[end])
 
-    b = reshape(T.(b), (1,  1, nlayers))
-    H = Tuple(T.(H))
+Fm = @. T(f₀^2 / (N² * δ * H[2:nlevels]))    # PV stretching part
+Fp = @. T(f₀^2 / (N² * δ * H[1:nlevels-1]))  # PV stretching part
+Fup = T(f₀^2 / δ[1])                         # upper buoyancy part
+Flo = T(f₀^2 / δ[end])                       # lower buoyancy part
 
-    g′ = b[1:nlayers-1] - b[2:nlayers] # reduced gravity at each interface
+typeofSkl = SArray{Tuple{nlevels + 2, nlevels + 2}, T, 2, (nlevels + 2)^2} # StaticArrays of type T and dims = (nlevels + 2, nlevels + 2)
 
-    Fm = @. T(f₀^2 / (g′ * H[2:nlayers]))
-    Fp = @. T(f₀^2 / (g′ * H[1:nlayers-1]))
+S = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
+calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
 
-    typeofSkl = SArray{Tuple{nlayers, nlayers}, T, 2, nlayers^2} # StaticArrays of type T and dims = (nlayers, nlayers)
+S⁻¹ = Array{typeofSkl, 2}(undef, (nkr, nl))  # Array of StaticArrays
+calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
 
-    S = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
-    calcS!(S, Fp, Fm, nlayers, grid)
+S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-    S⁻¹ = Array{typeofSkl, 2}(undef, (nkr, nl))  # Array of StaticArrays
-    calcS⁻¹!(S⁻¹, Fp, Fm, nlayers, grid)
+# J = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
+# calcJ!(J, nlevels, grid)
 
-    S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
+# J = A(J) # convert to appropriate ArrayType
 
-    @views Qy[:, :, 1] = @. Qy[:, :, 1] - Fp[1] * (U[:, :, 2] - U[:, :, 1])
-    for j = 2:nlayers-1
-      @views Qy[:, :, j] = @. Qy[:, :, j] - Fp[j] * (U[:, :, j+1] - U[:, :, j]) - Fm[j-1] * (U[:, :, j-1] - U[:, :, j])
-    end
-    @views Qy[:, :, nlayers] = @. Qy[:, :, nlayers] - Fm[nlayers-1] * (U[:, :, nlayers-1] - U[:, :, nlayers])
+@views Qy[:, :, 1] = @. Qy[:, :, 1] - 2 * Fup * (U[:, :, 1] - U[:, :, 2]) # ∂_y B_1/2 = - 2f₀/δ_1/2(U_1/2 - U_1) 
+for j = 2:nlevels+1
+  @views Qy[:, :, j] = @. Qy[:, :, j] - Fp[j] * (U[:, :, j+1] - U[:, :, j]) - Fm[j-1] * (U[:, :, j-1] - U[:, :, j])
+end
+@views Qy[:, :, end] = @. Qy[:, :, end] - 2 * Flo * (U[:, :, end-1] - U[:, :, end])  # ∂_y B_{N+1/2} = - 2f₀/δ_{N+1/2}(U_N - U_{N+1/2}) 
 
-    return Params(nlayers, T(f₀), T(β), Tuple(T.(b)), T.(H), U, eta, topographic_pv_gradient, T(μ), T(ν), nν, calcFq, Tuple(T.(g′)), Qx, Qy, S, S⁻¹, rfftplanlayered)
-  end
+  return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(μ), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
 
-numberoflayers(params) = params.nlayers
-numberoflayers(::SingleLayerParams) = 1
+numberoflevels(params) = params.nlevels
 
 # ---------
 # Equations
@@ -330,7 +289,7 @@ numberoflayers(::SingleLayerParams) = 1
     hyperviscosity(params, grid)
 
 Return the linear operator `L` that corresponds to (hyper)-viscosity of order ``n_ν`` with
-coefficient ``ν`` for ``n`` fluid layers.
+coefficient ``ν`` on the ``nlevels + 2'' interior and surface levels
 ```math
 L_j = - ν |𝐤|^{2 n_ν}, \\ j = 1, ..., n .
 ```
@@ -339,7 +298,7 @@ function hyperviscosity(params, grid)
   dev = grid.device
   T = eltype(grid)
 
-  L = device_array(dev){T}(undef, (grid.nkr, grid.nl, numberoflayers(params)))
+  L = device_array(dev){T}(undef, (grid.nkr, grid.nl, numberoflevels(params) + 2))
   @. L = - params.ν * grid.Krsq^params.nν
   @views @. L[1, 1, :] = 0
 
@@ -349,7 +308,7 @@ end
 """
     LinearEquation(params, grid)
 
-Return the equation for a multi-layer quasi-geostrophic problem with `params` and `grid`.
+Return the equation for a multi-level quasi-geostrophic problem with `params` and `grid`.
 The linear operator ``L`` includes only (hyper)-viscosity and is computed via
 `hyperviscosity(params, grid)`.
 
@@ -364,7 +323,7 @@ end
 """
     Equation(params, grid)
 
-Return the equation for a multi-layer quasi-geostrophic problem with `params` and `grid`.
+Return the equation for a multi-level quasi-geostrophic problem with `params` and `grid`.
 The linear operator ``L`` includes only (hyper)-viscosity and is computed via
 `hyperviscosity(params, grid)`.
 
@@ -384,12 +343,12 @@ end
 """
     struct Vars{Aphys, Atrans, F, P} <: AbstractVars
 
-The variables for multi-layer QG problem.
+The variables for multi-level QG problem.
 
 $(FIELDS)
 """
 struct Vars{Aphys, Atrans, F, P} <: AbstractVars
-    "relative vorticity + vortex stretching"
+    "upper surface buoyancy, interior PV, lower surface buoyancy (generalized PV)"
         q :: Aphys
     "streamfunction"
         ψ :: Aphys
@@ -397,7 +356,7 @@ struct Vars{Aphys, Atrans, F, P} <: AbstractVars
         u :: Aphys
     "``y``-component of velocity"
         v :: Aphys
-    "Fourier transform of relative vorticity + vortex stretching"
+    "Fourier transform of generalized PV"
        qh :: Atrans
     "Fourier transform of streamfunction"
        ψh :: Atrans
@@ -418,15 +377,15 @@ const StochasticForcedVars = Vars{<:AbstractArray, <:AbstractArray, <:AbstractAr
 """
     DecayingVars(grid, params)
 
-Return the variables for an unforced multi-layer QG problem with `grid` and `params`.
+Return the variables for an unforced multi-level QG problem with `grid` and `params`.
 """
 function DecayingVars(grid, params)
   Dev = typeof(grid.device)
   T = eltype(grid)
-  nlayers = numberoflayers(params)
+  nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlayers) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlayers) qh ψh uh vh
+  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, nothing, nothing)
 end
@@ -434,15 +393,15 @@ end
 """
     ForcedVars(grid, params)
 
-Return the variables for a forced multi-layer QG problem with `grid` and `params`.
+Return the variables for a forced multi-level QG problem with `grid` and `params`.
 """
 function ForcedVars(grid, params)
   Dev = typeof(grid.device)
   T = eltype(grid)
-  nlayers = numberoflayers(params)
+  nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlayers) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlayers) qh ψh uh vh Fqh
+  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh Fqh
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, Fqh, nothing)
 end
@@ -450,15 +409,15 @@ end
 """
     StochasticForcedVars(grid, params)
 
-Return the variables for a forced multi-layer QG problem with `grid` and `params`.
+Return the variables for a forced multi-level QG problem with `grid` and `params`.
 """
 function StochasticForcedVars(grid, params)
   Dev = typeof(grid.device)
   T = eltype(grid)
-  nlayers = numberoflayers(params)
+  nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlayers) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlayers) qh ψh uh vh Fqh prevsol
+  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh Fqh prevsol
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, Fqh, prevsol)
 end
@@ -487,7 +446,7 @@ matrix multiplication
 y = M x
 ```
 
-for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlayers`.
+for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels + 2`.
 This can be used to perform `qh = params.S * ψh` or `ψh = params.S⁻¹ qh`.
 
 StaticVectors are used to efficiently perform the matrix-vector multiplication.
@@ -511,7 +470,7 @@ end
 """
     pvfromstreamfunction!(qh, ψh, params, grid)
 
-Obtain the Fourier transform of the PV from the streamfunction `ψh` in each layer using
+Obtain the Fourier transform of the PV from the streamfunction `ψh` at each level using
 `qh = params.S * ψh`.
 
 The matrix multiplications are done via launching a kernel. We use a work layout over
@@ -530,8 +489,8 @@ function pvfromstreamfunction!(qh, ψh, params, grid)
   kernel! = pv_streamfunction_kernel!(backend, workgroup, worksize)
 
   # Launch the kernel
-  S, nlayers = params.S, params.nlayers
-  kernel!(qh, S, ψh, Val(nlayers))
+  S, nlevels = params.S, params.nlevels
+  kernel!(qh, S, ψh, Val(nlevels + 2))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
@@ -540,21 +499,9 @@ function pvfromstreamfunction!(qh, ψh, params, grid)
 end
 
 """
-    pvfromstreamfunction!(qh, ψh, params::SingleLayerParams, grid)
-
-Obtain the Fourier transform of the PV from the streamfunction `ψh` for the special
-case of a single fluid layer configuration. In this case, ``q̂ = - (k_x² + k_y²) ψ̂``.
-"""
-function pvfromstreamfunction!(qh, ψh, params::SingleLayerParams, grid)
-  @. qh = -grid.Krsq * ψh
-
-  return nothing
-end
-
-"""
     streamfunctionfrompv!(ψh, qh, params, grid)
 
-Invert the PV to obtain the Fourier transform of the streamfunction `ψh` in each layer from
+Invert the PV to obtain the Fourier transform of the streamfunction `ψh` at each level from
 `qh` using `ψh = params.S⁻¹ * qh`.
 
 The matrix multiplications are done via launching a kernel. We use a work layout over
@@ -573,8 +520,8 @@ function streamfunctionfrompv!(ψh, qh, params, grid)
   kernel! = pv_streamfunction_kernel!(backend, workgroup, worksize)
 
   # Launch the kernel
-  S⁻¹, nlayers = params.S⁻¹, params.nlayers
-  kernel!(ψh, S⁻¹, qh, Val(nlayers))
+  S⁻¹, nlevels = params.S⁻¹, params.nlevels
+  kernel!(ψh, S⁻¹, qh, Val(nlevels + 2))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
@@ -583,29 +530,21 @@ function streamfunctionfrompv!(ψh, qh, params, grid)
 end
 
 """
-    streamfunctionfrompv!(ψh, qh, params::SingleLayerParams, grid)
+    calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
 
-Invert the PV to obtain the Fourier transform of the streamfunction `ψh` for the special
-case of a single fluid layer configuration. In this case, ``ψ̂ = - (k_x² + k_y²)⁻¹ q̂``.
-"""
-function streamfunctionfrompv!(ψh, qh, params::SingleLayerParams, grid)
-  @. ψh = -grid.invKrsq * qh
-
-  return nothing
-end
-
-"""
-    calcS!(S, Fp, Fm, nlayers, grid)
-
-Construct the array ``𝕊``, which consists of `nlayer` x `nlayer` static arrays ``𝕊_𝐤`` that
+Construct the array ``𝕊``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``𝕊_𝐤`` that
 relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
 """
-function calcS!(S, Fp, Fm, nlayers, grid)
+function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
+  F[1, 1] = Fup
+  F[1, 2] = -Fup
+  F[end, end - 1] = Flo
+  F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n]
-    Skl = SMatrix{nlayers, nlayers}(- k² * I + F)
+    Skl = SMatrix{nlevels + 2, nlevels + 2}(diagm([0; fill(-k², nlevels); 0]) + F)  # subtracts off vorticity part only in the interior
     S[m, n] = Skl
   end
 
@@ -613,25 +552,51 @@ function calcS!(S, Fp, Fm, nlayers, grid)
 end
 
 """
-    calcS⁻¹!(S, Fp, Fm, nlayers, grid)
+    calcS⁻¹!(S, Fp, Fm, Fup, Flo, nlevels, grid)
 
-Construct the array ``𝕊⁻¹``, which consists of `nlayer` x `nlayer` static arrays ``(𝕊_𝐤)⁻¹``
+Construct the array ``𝕊⁻¹``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``(𝕊_𝐤)⁻¹``
 that relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``ψ̂_𝐤 = (𝕊_𝐤)⁻¹ q̂_𝐤``.
 """
-function calcS⁻¹!(S⁻¹, Fp, Fm, nlayers, grid)
+function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
+  F[1, 1] = Fup
+  F[1, 2] = -Fup
+  F[end, end - 1] = Flo
+  F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Skl = - k² * I + F
-    S⁻¹[m, n] = SMatrix{nlayers, nlayers}(I / Skl)
+    Skl = diagm([0; fill(-k², nlevels); 0]) + F                         # subtracts off vorticity part only in the interior
+    S⁻¹[m, n] = SMatrix{nlevels + 2, nlevels + 2}(I / Skl)
   end
 
   T = eltype(grid)
-  S⁻¹[1, 1] = SMatrix{nlayers, nlayers}(zeros(T, (nlayers, nlayers)))
+  S⁻¹[1, 1] = SMatrix{nlevels + 2, nlevels + 2}(zeros(T, (nlevels + 2, nlevels + 2)))
 
   return nothing
 end
+
+# """
+#     calcJ!(J, nlevels, grid)
+
+# Construct the array ``𝕁``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``𝕊_𝐤`` that
+# relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
+# """
+# function calcJ!(J, nlevels, grid)
+#   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
+#   F[1, 1] = Fup
+#   F[1, 2] = -Fup
+#   F[end, end - 1] = Flo
+#   F[end, end] = -Flo
+
+#   for n=1:grid.nl, m=1:grid.nkr
+#     k² = CUDA.@allowscalar grid.Krsq[m, n]
+#     Skl = SMatrix{nlevels + 2, nlevels + 2}(diagm([0; fill(-k², nlevels); 0]) + F)  # subtracts off vorticity part only in the interior
+#     S[m, n] = Skl
+#   end
+
+#   return nothing
+# end
 
 
 # -------
@@ -649,13 +614,13 @@ N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j �
 ```
 """
 function calcN!(N, sol, t, clock, vars, params, grid)
-  nlayers = numberoflayers(params)
+  nlevels = numberoflevels(params)
 
   dealias!(sol, grid)
 
   calcN_advection!(N, sol, vars, params, grid)
 
-  @views @. N[:, :, nlayers] += params.μ * grid.Krsq * vars.ψh[:, :, nlayers]   # bottom linear drag
+  @views @. N[:, :, nlevels] += params.μ * grid.Krsq * vars.ψh[:, :, nlevels]   # bottom linear drag
 
   addforcing!(N, sol, t, clock, vars, params, grid)
 
@@ -673,10 +638,10 @@ N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} + \\widehat{(∂_y �
 ```
 """
 function calcNlinear!(N, sol, t, clock, vars, params, grid)
-  nlayers = numberoflayers(params)
+  nlevels = numberoflevels(params)
 
   calcN_linearadvection!(N, sol, vars, params, grid)
-  @views @. N[:, :, nlayers] += params.μ * grid.Krsq * vars.ψh[:, :, nlayers]   # bottom linear drag
+  @views @. N[:, :, nlevels] += params.μ * grid.Krsq * vars.ψh[:, :, nlevels]   # bottom linear drag
   addforcing!(N, sol, t, clock, vars, params, grid)
 
   return nothing
@@ -697,11 +662,14 @@ function calcN_advection!(N, sol, vars, params, grid)
 
   streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
 
+  @views @. vars.ψh[:, :, 1] = 0.5 * (vars.ψh[:, :, 1] + vars.ψh[:, :, 2])           # advecting ψ on upper boundary is average of ψ_0 and ψ_1
+  @views @. vars.ψh[:, :, end] = 0.5 * (vars.ψh[:, :, end - 1] + vars.ψh[:, :, end]) # advecting ψ on lower boundary is average of ψ_N and ψ_N+1
+
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
   invtransform!(vars.u, vars.uh, params)
-  @. vars.u += params.U                    # add the imposed zonal flow U
+  @. vars.u += params.U                    # add the imposed zonal flow U (on upper boundary, in interior, and on lower boundary)
 
   uQx, uQxh = vars.q, vars.uh              # use vars.q and vars.uh as scratch variables
   @. uQx = vars.u * params.Qx              # (U+u)*∂Q/∂x
@@ -717,7 +685,7 @@ function calcN_advection!(N, sol, vars, params, grid)
 
   invtransform!(vars.q, vars.qh, params)
 
-  uq , vq  = vars.u , vars.v               # use vars.u and vars.v as scratch variables
+  uq, vq  = vars.u, vars.v                 # use vars.u and vars.v as scratch variables
   uqh, vqh = vars.uh, vars.vh              # use vars.uh and vars.vh as scratch variables
   @. uq *= vars.q                          # (U+u)*q
   @. vq *= vars.q                          # v*q
@@ -746,6 +714,9 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
 
   streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
 
+  @views @. vars.ψh[:, :, 1] = 0.5 * (vars.ψh[:, :, 1] + vars.ψh[:, :, 2])           # advecting ψ on upper boundary is average of ψ_0 and ψ_1
+  @views @. vars.ψh[:, :, end] = 0.5 * (vars.ψh[:, :, end - 1] + vars.ψh[:, :, end]) # advecting ψ on lower boundary is average of ψ_N and ψ_N+1
+
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
@@ -768,7 +739,7 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
   invtransform!(vars.q, vars.qh, params)
 
   @. vars.u  = params.U
-  Uq , Uqh  = vars.u , vars.uh             # use vars.u and vars.uh as scratch variables
+  Uq, Uqh  = vars.u, vars.uh               # use vars.u and vars.uh as scratch variables
   @. Uq *= vars.q                          # U*q
 
   fwdtransform!(Uqh, Uq, params)
@@ -782,7 +753,7 @@ end
 """
     addforcing!(N, sol, t, clock, vars, params, grid)
 
-When the problem includes forcing, calculate the forcing term ``F̂`` for each layer and add
+When the problem includes forcing, calculate the forcing term ``F̂`` at each level and add
 it to the nonlinear term ``N``.
 """
 addforcing!(N, sol, t, clock, vars::Vars, params, grid) = nothing
@@ -840,15 +811,6 @@ function set_q!(sol, params, vars, grid, q)
   return nothing
 end
 
-function set_q!(sol, params::SingleLayerParams, vars, grid, q::AbstractArray{T, 2}) where T
-  A = typeof(vars.q[:, :, 1])
-  q_3D = vars.q
-  @views q_3D[:, :, 1] = A(q)
-  set_q!(sol, params, vars, grid, q_3D)
-
-  return nothing
-end
-
 set_q!(prob, q) = set_q!(prob.sol, prob.params, prob.vars, prob.grid, q)
 
 
@@ -870,144 +832,109 @@ function set_ψ!(sol, params, vars, grid, ψ)
   return nothing
 end
 
-function set_ψ!(sol, params::SingleLayerParams, vars, grid, ψ::AbstractArray{T, 2}) where T
-  A = typeof(vars.ψ[:, :, 1])
-  ψ_3D = vars.ψ
-  @views ψ_3D[:, :, 1] = A(ψ)
-
-  set_ψ!(sol, params, vars, grid, ψ_3D)
-
-  return nothing
-end
-
 set_ψ!(prob, ψ) = set_ψ!(prob.sol, prob.params, prob.vars, prob.grid, ψ)
 
 
-"""
-    energies(vars, params, grid, sol)
-    energies(prob)
+# """
+#     energies(vars, params, grid, sol)
+#     energies(prob)
 
-Return the kinetic energy of each fluid layer KE``_1, ...,`` KE``_{n}``, and the
-potential energy of each fluid interface PE``_{3/2}, ...,`` PE``_{n-1/2}``, where ``n``
-is the number of layers in the fluid. (When ``n=1``, only the kinetic energy is returned.)
+# Return the kinetic energy of each fluid layer KE``_1, ...,`` KE``_{n}``, and the
+# potential energy of each fluid interface PE``_{3/2}, ...,`` PE``_{n-1/2}``, where ``n``
+# is the number of layers in the fluid. (When ``n=1``, only the kinetic energy is returned.)
 
-The kinetic energy at the ``j``-th fluid layer is
+# The kinetic energy at the ``j``-th fluid layer is
 
-```math
-𝖪𝖤_j = \\frac{H_j}{H} \\int \\frac1{2} |{\\bf ∇} ψ_j|^2 \\frac{𝖽x 𝖽y}{L_x L_y} = \\frac1{2} \\frac{H_j}{H} \\sum_{𝐤} |𝐤|² |ψ̂_j|², \\ j = 1, ..., n ,
-```
+# ```math
+# 𝖪𝖤_j = \\frac{H_j}{H} \\int \\frac1{2} |{\\bf ∇} ψ_j|^2 \\frac{𝖽x 𝖽y}{L_x L_y} = \\frac1{2} \\frac{H_j}{H} \\sum_{𝐤} |𝐤|² |ψ̂_j|², \\ j = 1, ..., n ,
+# ```
 
-while the potential energy that corresponds to the interface ``j+1/2`` (i.e., the interface
-between the ``j``-th and ``(j+1)``-th fluid layer) is
+# while the potential energy that corresponds to the interface ``j+1/2`` (i.e., the interface
+# between the ``j``-th and ``(j+1)``-th fluid layer) is
 
-```math
-𝖯𝖤_{j+1/2} = \\int \\frac1{2} \\frac{f₀^2}{g'_{j+1/2} H} (ψ_j - ψ_{j+1})^2 \\frac{𝖽x 𝖽y}{L_x L_y} = \\frac1{2} \\frac{f₀^2}{g'_{j+1/2} H} \\sum_{𝐤} |ψ̂_j - ψ̂_{j+1}|², \\ j = 1, ..., n-1 .
-```
-"""
-function energies(vars, params, grid, sol)
-  nlayers = numberoflayers(params)
-  KE, PE = zeros(nlayers), zeros(nlayers-1)
+# ```math
+# 𝖯𝖤_{j+1/2} = \\int \\frac1{2} \\frac{f₀^2}{g'_{j+1/2} H} (ψ_j - ψ_{j+1})^2 \\frac{𝖽x 𝖽y}{L_x L_y} = \\frac1{2} \\frac{f₀^2}{g'_{j+1/2} H} \\sum_{𝐤} |ψ̂_j - ψ̂_{j+1}|², \\ j = 1, ..., n-1 .
+# ```
+# """
+# function energies(vars, params, grid, sol)
+#   nlevels = numberoflevels(params)
+#   KE, PE = zeros(nlevels), zeros(nlevels-1)
 
-  @. vars.qh = sol
-  streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
+#   @. vars.qh = sol
+#   streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
 
-  abs²∇𝐮h = vars.uh        # use vars.uh as scratch variable
-  @. abs²∇𝐮h = grid.Krsq * abs2(vars.ψh)
+#   abs²∇𝐮h = vars.uh        # use vars.uh as scratch variable
+#   @. abs²∇𝐮h = grid.Krsq * abs2(vars.ψh)
 
-  V = grid.Lx * grid.Ly * sum(params.H)  # total volume of the fluid
+#   V = grid.Lx * grid.Ly * sum(params.H)  # total volume of the fluid
 
-  for j = 1:nlayers
-    view(KE, j) .= 1 / (2 * V) * parsevalsum(view(abs²∇𝐮h, :, :, j), grid) * params.H[j]
-  end
+#   for j = 1:nlevels
+#     view(KE, j) .= 1 / (2 * V) * parsevalsum(view(abs²∇𝐮h, :, :, j), grid) * params.H[j]
+#   end
 
-  for j = 1:nlayers-1
-    view(PE, j) .= 1 / (2 * V) * params.f₀^2 ./ params.g′[j] .* parsevalsum(abs2.(view(vars.ψh, :, :, j) .- view(vars.ψh, :, :, j+1)), grid)
-  end
+#   for j = 1:nlevels-1
+#     view(PE, j) .= 1 / (2 * V) * params.f₀^2 ./ params.g′[j] .* parsevalsum(abs2.(view(vars.ψh, :, :, j) .- view(vars.ψh, :, :, j+1)), grid)
+#   end
 
-  return KE, PE
-end
+#   return KE, PE
+# end
 
-function energies(vars, params::SingleLayerParams, grid, sol)
-  @. vars.qh = sol
-  streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
+# energies(prob) = energies(prob.vars, prob.params, prob.grid, prob.sol)
 
-  abs²∇𝐮h = vars.uh        # use vars.uh as scratch variable
-  @. abs²∇𝐮h = grid.Krsq * abs2(vars.ψh)
+# """
+#     fluxes(vars, params, grid, sol)
+#     fluxes(prob)
 
-  return 1 / (2 * grid.Lx * grid.Ly) * parsevalsum(abs²∇𝐮h, grid)
-end
+# Return the lateral eddy fluxes within each fluid layer, lateralfluxes``_1,...,``lateralfluxes``_n``
+# and also the vertical eddy fluxes at each fluid interface,
+# verticalfluxes``_{3/2},...,``verticalfluxes``_{n-1/2}``, where ``n`` is the total number of layers in the fluid.
+# (For a single fluid layer, i.e., when ``n=1``, only the lateral fluxes are returned.)
 
-energies(prob) = energies(prob.vars, prob.params, prob.grid, prob.sol)
+# The lateral eddy fluxes within the ``j``-th fluid layer are
 
-"""
-    fluxes(vars, params, grid, sol)
-    fluxes(prob)
+# ```math
+# \\textrm{lateralfluxes}_j = \\frac{H_j}{H} \\int U_j v_j ∂_y u_j
+# \\frac{𝖽x 𝖽y}{L_x L_y} , \\  j = 1, ..., n ,
+# ```
 
-Return the lateral eddy fluxes within each fluid layer, lateralfluxes``_1,...,``lateralfluxes``_n``
-and also the vertical eddy fluxes at each fluid interface,
-verticalfluxes``_{3/2},...,``verticalfluxes``_{n-1/2}``, where ``n`` is the total number of layers in the fluid.
-(For a single fluid layer, i.e., when ``n=1``, only the lateral fluxes are returned.)
+# while the vertical eddy fluxes at the ``j+1/2``-th fluid interface (i.e., interface between
+# the ``j``-th and ``(j+1)``-th fluid layer) are
 
-The lateral eddy fluxes within the ``j``-th fluid layer are
+# ```math
+# \\textrm{verticalfluxes}_{j+1/2} = \\int \\frac{f₀²}{g'_{j+1/2} H} (U_j - U_{j+1}) \\,
+# v_{j+1} ψ_{j} \\frac{𝖽x 𝖽y}{L_x L_y} , \\ j = 1, ..., n-1.
+# ```
+# """
+# function fluxes(vars, params, grid, sol)
 
-```math
-\\textrm{lateralfluxes}_j = \\frac{H_j}{H} \\int U_j v_j ∂_y u_j
-\\frac{𝖽x 𝖽y}{L_x L_y} , \\  j = 1, ..., n ,
-```
+#   nlevels = numberoflevels(params)
 
-while the vertical eddy fluxes at the ``j+1/2``-th fluid interface (i.e., interface between
-the ``j``-th and ``(j+1)``-th fluid layer) are
+#   lateralfluxes, verticalfluxes = zeros(nlevels), zeros(nlevels-1)
 
-```math
-\\textrm{verticalfluxes}_{j+1/2} = \\int \\frac{f₀²}{g'_{j+1/2} H} (U_j - U_{j+1}) \\,
-v_{j+1} ψ_{j} \\frac{𝖽x 𝖽y}{L_x L_y} , \\ j = 1, ..., n-1.
-```
-"""
-function fluxes(vars, params, grid, sol)
+#   updatevars!(vars, params, grid, sol)
 
-  nlayers = numberoflayers(params)
+#   ∂u∂yh = vars.uh           # use vars.uh as scratch variable
+#   ∂u∂y  = vars.u            # use vars.u  as scratch variable
 
-  lateralfluxes, verticalfluxes = zeros(nlayers), zeros(nlayers-1)
+#   @. ∂u∂yh = im * grid.l * vars.uh
+#   invtransform!(∂u∂y, ∂u∂yh, params)
 
-  updatevars!(vars, params, grid, sol)
+#   V = grid.Lx * grid.Ly * sum(params.H)  # total volume of the fluid
 
-  ∂u∂yh = vars.uh           # use vars.uh as scratch variable
-  ∂u∂y  = vars.u            # use vars.u  as scratch variable
+#   lateralfluxes = params.H .* (sum(@. params.U * vars.v * ∂u∂y; dims=(1, 2)))[1, 1, :]
+#   lateralfluxes *= grid.dx * grid.dy / V
 
-  @. ∂u∂yh = im * grid.l * vars.uh
-  invtransform!(∂u∂y, ∂u∂yh, params)
+#   for j = 1:nlevels-1
+#     Uⱼ, Uⱼ₊₁ = view(params.U, :, :, j), view(params.U, :, :, j+1)
+#     ψⱼ = view(vars.ψ, :, :, j)
+#     vⱼ₊₁ = view(vars.v, :, :, j+1)
+#     verticalfluxes[j] = sum(@. params.f₀^2 / params.g′[j] * (Uⱼ - Uⱼ₊₁) * vⱼ₊₁ * ψⱼ)
+#   end
+#   verticalfluxes *= grid.dx * grid.dy / V
 
-  V = grid.Lx * grid.Ly * sum(params.H)  # total volume of the fluid
+#   return lateralfluxes, verticalfluxes
+# end
 
-  lateralfluxes = params.H .* (sum(@. params.U * vars.v * ∂u∂y; dims=(1, 2)))[1, 1, :]
-  lateralfluxes *= grid.dx * grid.dy / V
-
-  for j = 1:nlayers-1
-    Uⱼ, Uⱼ₊₁ = view(params.U, :, :, j), view(params.U, :, :, j+1)
-    ψⱼ = view(vars.ψ, :, :, j)
-    vⱼ₊₁ = view(vars.v, :, :, j+1)
-    verticalfluxes[j] = sum(@. params.f₀^2 / params.g′[j] * (Uⱼ - Uⱼ₊₁) * vⱼ₊₁ * ψⱼ)
-  end
-  verticalfluxes *= grid.dx * grid.dy / V
-
-  return lateralfluxes, verticalfluxes
-end
-
-function fluxes(vars, params::SingleLayerParams, grid, sol)
-  updatevars!(vars, params, grid, sol)
-
-  ∂u∂yh = vars.uh           # use vars.uh as scratch variable
-  ∂u∂y  = vars.u            # use vars.u  as scratch variable
-
-  @. ∂u∂yh = im * grid.l * vars.uh
-  invtransform!(∂u∂y, ∂u∂yh, params)
-
-  lateralfluxes = sum(@. params.U * vars.v * ∂u∂y)
-  lateralfluxes *= grid.dx * grid.dy / (grid.Lx * grid.Ly)
-
-  return lateralfluxes
-end
-
-fluxes(prob) = fluxes(prob.vars, prob.params, prob.grid, prob.sol)
+# fluxes(prob) = fluxes(prob.vars, prob.params, prob.grid, prob.sol)
 
 end # module
