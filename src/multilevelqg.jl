@@ -42,7 +42,7 @@ nothingfunction(args...) = nothing
                           N² = -(1 .+ 1/nlevels+1 * (0:nlevels+1)),
                         eta = nothing,
     topographic_gradient = (0, 0),
-                          μ = 0,
+                          r = 0,
                           ν = 0,
                          nν = 1,
                          dt = 0.01,
@@ -73,7 +73,7 @@ Keyword arguments
   - `N²`: Background buoyancy frequency at half-index levels.
   - `eta`: Periodic component of the bathymetry.
   - `topographic_gradient`: The ``(x, y)`` components of the topographic large-scale gradient.
-  - `μ`: Linear bottom drag coefficient.
+  - `r`: Linear bottom drag coefficient.
   - `ν`: Small-scale (hyper)-viscosity coefficient.
   - `nν`: (Hyper)-viscosity order, `nν```≥ 1``.
   - `dt`: Time-step.
@@ -100,7 +100,7 @@ function Problem(nlevels::Int,                                     # number of i
                           eta = nothing,                           # periodic component of the bathymetry
       topographic_gradient = (0, 0),                               # tuple with the ``(x, y)`` components of topographic large-scale gradient
               # Bottom Drag and/or (hyper)-viscosity
-                            μ = 0,
+                            r = 0,
                             ν = 0,
                            nν = 1,
               # Timestepper and equation options
@@ -118,7 +118,7 @@ function Problem(nlevels::Int,                                     # number of i
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlevels, f₀, β, N², H, U, eta, topographic_gradient, μ, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, N², H, U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -146,14 +146,14 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
          N² :: Tuple
     "tuple with rest height between half-index levels"
          H :: Tuple
-    "array with imposed constant zonal flow ``U(y)`` in at each level (surfaces and interior levels)"
+    "array with imposed constant zonal flow ``U(y)`` at each level (surfaces and interior levels)"
          U :: Aphys3D
     "array containing the bathymetry"
        eta :: Aphys2D
     "tuple containing the ``(x, y)`` components of topographic large-scale gradient"
     topographic_gradient :: Tuple{T, T}
     "linear bottom drag coefficient"
-         μ :: T
+         r :: T
     "small-scale (hyper)-viscosity coefficient"
          ν :: T
     "(hyper)-viscosity order, `nν```≥ 1``"
@@ -164,7 +164,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   # derived params
     "array containing ``x``-gradient of generalized PV due to topographic PV at upper surface, lower surface and interior levels"
         Qx :: Aphys3D
-    "array containing ``y``-gradient of generalzied PV due to ``β``, ``U``, and topographic PV at upper surface, lower surface and interior levels"
+    "array containing ``y``-gradient of generalized PV due to ``β``, ``U``, and topographic PV at upper surface, lower surface and interior levels"
         Qy :: Aphys3D
     "array containing coefficients for getting PV from streamfunction"
          S :: Atrans4D
@@ -208,7 +208,7 @@ function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   return A(U_3D)
 end
 
-function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, μ, ν, nν, grid::TwoDGrid;
+function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
@@ -220,7 +220,7 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, μ
 
   U = convert_U_to_U3D(dev, nlevels, grid, U)
 
-  Uyy = real.(ifft(-l.^2 .* fft(U[:,:,2:nlevels+1]))) # only calculate curvature of shear for interior PV part
+  Uyy = real.(ifft(-l.^2 .* fft(U[:, :, 2 : end - 1]))) # only calculate curvature of shear for interior PV part
   Uyy = CUDA.@allowscalar repeat(Uyy, outer=(nx, 1, 1))
 
   # Calculate the periodic components of the bathymetry gradients
@@ -238,7 +238,7 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, μ
   @views @. Qx[:, :, end] += N²[end] .* etax
 
   Qy = zeros(dev, T, (nx, ny, nlevels + 2))
-  @views @. Qy[:, :, 2 : nlevels + 1] = T(β) .- Uyy  # T(β) ensures that Qy remains same type as U
+  @views @. Qy[:, :, 2 : end - 1] = T(β) .- Uyy  # T(β) ensures that Qy remains same type as U
   @views @. Qy[:, :, end] += N²[end] .* etay
 
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
@@ -247,13 +247,13 @@ H = Tuple(T.(H))
 
 δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
 @views δ[1] = 0.5 * (H[1] + H[2])
-@views @. δ[2:end-1] = 0.5 * (H[1:end-1] + H[2:end])
-@views δ[end] = 0.5 * (H[end-1] + H[end])
+@views @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
+@views δ[end] = 0.5 * (H[end - 1] + H[end])
 
-Fm = @. T(f₀^2 / (N² * δ * H[2:nlevels]))    # PV stretching part
-Fp = @. T(f₀^2 / (N² * δ * H[1:nlevels-1]))  # PV stretching part
-Fup = T(f₀^2 / δ[1])                         # upper buoyancy part
-Flo = T(f₀^2 / δ[end])                       # lower buoyancy part
+Fm = @. T(f₀^2 / (N² * δ * H[2 : nlevels]))      # PV stretching part
+Fp = @. T(f₀^2 / (N² * δ * H[1 : nlevels - 1]))  # PV stretching part
+Fup = T(f₀ / δ[1])                               # upper buoyancy part
+Flo = T(f₀ / δ[end])                             # lower buoyancy part
 
 typeofSkl = SArray{Tuple{nlevels + 2, nlevels + 2}, T, 2, (nlevels + 2)^2} # StaticArrays of type T and dims = (nlevels + 2, nlevels + 2)
 
@@ -274,9 +274,9 @@ S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 for j = 2:nlevels+1
   @views Qy[:, :, j] = @. Qy[:, :, j] - Fp[j] * (U[:, :, j+1] - U[:, :, j]) - Fm[j-1] * (U[:, :, j-1] - U[:, :, j])
 end
-@views Qy[:, :, end] = @. Qy[:, :, end] - 2 * Flo * (U[:, :, end-1] - U[:, :, end])  # ∂_y B_{N+1/2} = - 2f₀/δ_{N+1/2}(U_N - U_{N+1/2}) 
+@views Qy[:, :, end] = @. Qy[:, :, end] - 2 * Flo * (U[:, :, end - 1] - U[:, :, end])  # ∂_y B_{N+1/2} = - 2f₀/δ_{N+1/2}(U_N - U_{N+1/2}) 
 
-  return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(μ), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -610,7 +610,7 @@ Compute the nonlinear term, that is the advection term, the bottom drag, and the
 
 ```math
 N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j}
- + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} μ |𝐤|^2 ψ̂_n + F̂_j .
+ + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} N² r |𝐤|^2 ψ̂_n + F̂_j .
 ```
 """
 function calcN!(N, sol, t, clock, vars, params, grid)
@@ -620,7 +620,7 @@ function calcN!(N, sol, t, clock, vars, params, grid)
 
   calcN_advection!(N, sol, vars, params, grid)
 
-  @views @. N[:, :, nlevels] += params.μ * grid.Krsq * vars.ψh[:, :, nlevels]   # bottom linear drag
+  @views @. N[:, :, end] += N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
 
   addforcing!(N, sol, t, clock, vars, params, grid)
 
@@ -634,14 +634,14 @@ Compute the nonlinear term of the linearized equations:
 
 ```math
 N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} + \\widehat{(∂_y ψ_j)(∂_x Q_j)}
-- \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} μ |𝐤|^2 ψ̂_n + F̂_j .
+- \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} N² r |𝐤|^2 ψ̂_n + F̂_j .
 ```
 """
 function calcNlinear!(N, sol, t, clock, vars, params, grid)
   nlevels = numberoflevels(params)
 
   calcN_linearadvection!(N, sol, vars, params, grid)
-  @views @. N[:, :, nlevels] += params.μ * grid.Krsq * vars.ψh[:, :, nlevels]   # bottom linear drag
+  @views @. N[:, :, end] += N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
   addforcing!(N, sol, t, clock, vars, params, grid)
 
   return nothing
