@@ -244,20 +244,17 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
 
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
 
-H = T.(H)
-N² = reshape(T.(N²), (1, 1, nlevels + 1))
+  H = Tuple(T.(H))
 
-δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
-CUDA.@allowscalar δ[1] = 0.5 * (H[1] + H[2])
-@views @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
-CUDA.@allowscalar δ[end] = 0.5 * (H[end - 1] + H[end])
+  δ = zeros(T, nlevels + 1) # height of jumps between integer levels
+  δ[1] = 0.5 * (H[1] + H[2])
+  @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
+  δ[end] = 0.5 * (H[end - 1] + H[end])
 
-H = Tuple(H)
-
-Fm = @. T(f₀^2 / (N²[1 : end - 1] * δ[1 : end - 1] * H))      # PV stretching part (lower diagonal)
-Fp = @. T(f₀^2 / (N²[2 : end] * δ[2 : end] * H))              # PV stretching part (upper diagonal)
-Fup = CUDA.@allowscalar T(f₀ / δ[1])                          # upper buoyancy part
-Flo = CUDA.@allowscalar T(f₀ / δ[end])                        # lower buoyancy part
+  Fm = @. T(f₀^2 / (N²[1 : end - 1] * δ[1 : end - 1] * H))    # PV stretching part (lower diagonal)
+  Fp = @. T(f₀^2 / (N²[2 : end] * δ[2 : end] * H))            # PV stretching part (upper diagonal)
+  Fup = T(f₀ / δ[1])                                          # upper buoyancy part
+  Flo = T(f₀ / δ[end])                                        # lower buoyancy part
 
 typeofSkl = SArray{Tuple{nlevels + 2, nlevels + 2}, T, 2, (nlevels + 2)^2} # StaticArrays of type T and dims = (nlevels + 2, nlevels + 2)
 
@@ -540,11 +537,11 @@ Construct the array ``𝕊``, which consists of `nlevels + 2` x `nlevels + 2` st
 relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
 """
 function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal([0; Fm], -([0; Fp; 0] + [0; Fm; 0]), [Fp; 0]))
-  CUDA.@allowscalar F[1, 1] = Fup
-  CUDA.@allowscalar F[1, 2] = -Fup
-  CUDA.@allowscalar F[end, end - 1] = Flo
-  CUDA.@allowscalar F[end, end] = -Flo
+  F = Matrix(Tridiagonal([Fm; 0], -([0; Fp; 0] + [0; Fm; 0]), [0; Fp]))
+  F[1, 1] = Fup
+  F[1, 2] = -Fup
+  F[end, end - 1] = Flo
+  F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n]
@@ -562,11 +559,11 @@ Construct the array ``𝕊⁻¹``, which consists of `nlevels + 2` x `nlevels + 
 that relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``ψ̂_𝐤 = (𝕊_𝐤)⁻¹ q̂_𝐤``.
 """
 function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal([0; Fm], -([0; Fp; 0] + [0; Fm; 0]), [Fp; 0]))
-  CUDA.@allowscalar F[1, 1] = Fup
-  CUDA.@allowscalar F[1, 2] = -Fup
-  CUDA.@allowscalar F[end, end - 1] = Flo
-  CUDA.@allowscalar F[end, end] = -Flo
+  F = Matrix(Tridiagonal([Fm; 0], -([0; Fp; 0] + [0; Fm; 0]), [0; Fp]))
+  F[1, 1] = Fup
+  F[1, 2] = -Fup
+  F[end, end - 1] = Flo
+  F[end, end] = -Flo
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
