@@ -244,13 +244,15 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
 
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
 
-H = Tuple(T.(H))
+H = T.(H)
 N² = reshape(T.(N²), (1, 1, nlevels + 1))
 
 δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
 CUDA.@allowscalar δ[1] = 0.5 * (H[1] + H[2])
 @views @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
 CUDA.@allowscalar δ[end] = 0.5 * (H[end - 1] + H[end])
+
+H = Tuple(H)
 
 Fm = @. T(f₀^2 / (N²[1 : end - 1] * δ[1 : end - 1] * H))      # PV stretching part (lower diagonal)
 Fp = @. T(f₀^2 / (N²[2 : end] * δ[2 : end] * H))              # PV stretching part (upper diagonal)
