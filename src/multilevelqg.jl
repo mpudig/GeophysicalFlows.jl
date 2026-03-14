@@ -245,16 +245,17 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
 
 H = Tuple(T.(H))
+N² = reshape(T.(N²), (1, 1, nlevels + 1))
 
 δ = zeros(dev, T, (nlevels + 1)) # height of jumps between integer levels
 CUDA.@allowscalar δ[1] = 0.5 * (H[1] + H[2])
 @views @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
 CUDA.@allowscalar δ[end] = 0.5 * (H[end - 1] + H[end])
 
-Fm = @. T(f₀^2 / (N² * δ * H[2 : nlevels]))      # PV stretching part
-Fp = @. T(f₀^2 / (N² * δ * H[1 : nlevels - 1]))  # PV stretching part
-Fup = T(f₀ / δ[1])                               # upper buoyancy part
-Flo = T(f₀ / δ[end])                             # lower buoyancy part
+Fm = @. T(f₀^2 / (N²[1 : end - 1] * δ[1 : end - 1] * H))      # PV stretching part (lower diagonal)
+Fp = @. T(f₀^2 / (N²[2 : end] * δ[2 : end] * H))              # PV stretching part (upper diagonal)
+Fup = CUDA.@allowscalar T(f₀ / δ[1])                          # upper buoyancy part
+Flo = CUDA.@allowscalar T(f₀ / δ[end])                        # lower buoyancy part
 
 typeofSkl = SArray{Tuple{nlevels + 2, nlevels + 2}, T, 2, (nlevels + 2)^2} # StaticArrays of type T and dims = (nlevels + 2, nlevels + 2)
 
@@ -537,7 +538,7 @@ Construct the array ``𝕊``, which consists of `nlevels + 2` x `nlevels + 2` st
 relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
 """
 function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
+  F = Matrix(Tridiagonal([0; Fm], -([0; Fp; 0] + [0; Fm; 0]), [Fp; 0]))
   CUDA.@allowscalar F[1, 1] = Fup
   CUDA.@allowscalar F[1, 2] = -Fup
   CUDA.@allowscalar F[end, end - 1] = Flo
@@ -559,7 +560,7 @@ Construct the array ``𝕊⁻¹``, which consists of `nlevels + 2` x `nlevels + 
 that relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``ψ̂_𝐤 = (𝕊_𝐤)⁻¹ q̂_𝐤``.
 """
 function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
+  F = Matrix(Tridiagonal([0; Fm], -([0; Fp; 0] + [0; Fm; 0]), [Fp; 0]))
   CUDA.@allowscalar F[1, 1] = Fup
   CUDA.@allowscalar F[1, 2] = -Fup
   CUDA.@allowscalar F[end, end - 1] = Flo
