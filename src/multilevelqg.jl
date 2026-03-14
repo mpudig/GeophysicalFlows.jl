@@ -597,7 +597,7 @@ function calcN!(N, sol, t, clock, vars, params, grid)
 
   calcN_advection!(N, sol, vars, params, grid)
 
-  @views @. N[:, :, end] += N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
+  @views @. N[:, :, end] += params.N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
 
   addforcing!(N, sol, t, clock, vars, params, grid)
 
@@ -618,7 +618,7 @@ function calcNlinear!(N, sol, t, clock, vars, params, grid)
   nlevels = numberoflevels(params)
 
   calcN_linearadvection!(N, sol, vars, params, grid)
-  @views @. N[:, :, end] += N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
+  @views @. N[:, :, end] += params.N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
   addforcing!(N, sol, t, clock, vars, params, grid)
 
   return nothing
