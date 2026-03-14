@@ -266,16 +266,15 @@ calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
 
 S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-# J = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
-# calcJ!(J, nlevels, grid)
+U_invadv = copy(U) # inverse of advecting version of U, where U_0 = 2U_1/2 - U_1 and U_N+1 = 2U_N+1/2 - U_N
+@views @. U_invadv[:, :, 1] = 2 * U[:, :, 1] - U[:, :, 2]
+@views @. U_invadv[:, :, end] = 2 * U[:, :, end] - U[:, :, end - 1]
 
-# J = A(J) # convert to appropriate ArrayType
-
-@views Qy[:, :, 1] = @. Qy[:, :, 1] - 2 * Fup * (U[:, :, 1] - U[:, :, 2]) # ∂_y B_1/2 = - 2f₀/δ_1/2(U_1/2 - U_1) 
-for j = 2:nlevels+1
-  @views Qy[:, :, j] = @. Qy[:, :, j] - Fp[j] * (U[:, :, j+1] - U[:, :, j]) - Fm[j-1] * (U[:, :, j-1] - U[:, :, j])
+@views @. Qy[:, :, 1] -= Fup * (U_invadv[:, :, 1] - U_invadv[:, :, 2])
+for j = 2 : nlevels + 1
+    @views @. Qy[:, :, j] -= Fm[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j - 1]) + Fp[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j + 1])
 end
-@views Qy[:, :, end] = @. Qy[:, :, end] - 2 * Flo * (U[:, :, end - 1] - U[:, :, end])  # ∂_y B_{N+1/2} = - 2f₀/δ_{N+1/2}(U_N - U_{N+1/2}) 
+@views @. Qy[:, :, end] -= Flo * (U_invadv[:, :, end] - U_invadv[:, :, end - 1])
 
   return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
@@ -576,29 +575,6 @@ function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
 
   return nothing
 end
-
-# """
-#     calcJ!(J, nlevels, grid)
-
-# Construct the array ``𝕁``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``𝕊_𝐤`` that
-# relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
-# """
-# function calcJ!(J, nlevels, grid)
-#   F = Matrix(Tridiagonal(Fm, -([Fp; 0] + [0; Fm]), Fp))
-#   F[1, 1] = Fup
-#   F[1, 2] = -Fup
-#   F[end, end - 1] = Flo
-#   F[end, end] = -Flo
-
-#   for n=1:grid.nl, m=1:grid.nkr
-#     k² = CUDA.@allowscalar grid.Krsq[m, n]
-#     Skl = SMatrix{nlevels + 2, nlevels + 2}(diagm([0; fill(-k², nlevels); 0]) + F)  # subtracts off vorticity part only in the interior
-#     S[m, n] = Skl
-#   end
-
-#   return nothing
-# end
-
 
 # -------
 # Solvers
