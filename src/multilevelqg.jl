@@ -274,7 +274,7 @@ U_invadv = copy(U) # inverse of advecting version of U, where U_0 = 2U_1/2 - U_1
 for j = 2 : nlevels + 1
     @views @. Qy[:, :, j] -= Fm[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j - 1]) + Fp[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j + 1])
 end
-@views @. Qy[:, :, end] -= Flo * (U_invadv[:, :, end] - U_invadv[:, :, end - 1])
+@views @. Qy[:, :, end] -= Flo * (U_invadv[:, :, end - 1] - U_invadv[:, :, end])
 
   return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
