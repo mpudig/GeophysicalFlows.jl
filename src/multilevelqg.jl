@@ -266,15 +266,15 @@ calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
 
 S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-U_invadv = copy(U) # inverse of advecting version of U, where U_0 = 2U_1/2 - U_1 and U_N+1 = 2U_N+1/2 - U_N
-@views @. U_invadv[:, :, 1] = 2 * U[:, :, 1] - U[:, :, 2]
-@views @. U_invadv[:, :, end] = 2 * U[:, :, end] - U[:, :, end - 1]
-
-@views @. Qy[:, :, 1] -= 0 #Fup * (U_invadv[:, :, 1] - U_invadv[:, :, 2])
-for j = 2 : nlevels + 1
-    @views @. Qy[:, :, j] += Fm[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j - 1]) + Fp[j - 1] * (U_invadv[:, :, j] - U_invadv[:, :, j + 1])
+# Second order accurate discretization of \partial_y B at the boundaries and \partial_y Q in the interior:
+# NB: U = [U_1/2, U_1, ..., U_N, U_N+1/2]
+@views @. Qy[:, :, 1] -= Fup * 1/3 * (-8 * U[:, :, 1] + 9 * U[:, :, 2] - U[:, :, 3])
+@views @. Qy[:, :, 2] -= Fp[1] * (U[:, :, 3] - U[:, :, 2]) - 2 * Fm[1] * (U[:, :, 2] - U[:, :, 1])
+for j = 3 : nlevels
+    @views @. Qy[:, :, j] -= Fp[j - 1] * (U[:, :, j + 1] - U[:, :, j]) - Fm[j - 1] * (U[:, :, j] - U[:, :, j - 1])
 end
-@views @. Qy[:, :, end] -= 0 #Flo * (U_invadv[:, :, end - 1] - U_invadv[:, :, end])
+@views @. Qy[:, :, nlevels + 1] -= 2 * Fp[nlevels] * (U[:, :, nlevels + 2] - U[:, :, nlevels + 1]) - Fm[nlevels] * (U[:, :, nlevels + 1] - U[:, :, nlevels])
+@views @. Qy[:, :, nlevels + 2] -= Flo * 1/3 * (U[:, :, nlevels] - 9 * U[:, :, nlevels + 1] + 8 * U[:, :, nlevels + 2])
 
   return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
