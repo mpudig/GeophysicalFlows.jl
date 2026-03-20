@@ -257,7 +257,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   calcF!(F, f₀, H₀, N², nlevels)
 
   # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
-  Qy .-= A(reshape(F * reshape(Array(U), nlevels, ny), 1, ny, nlevels))
+  Qy .-= A(reshape(permutedims(F * permutedims(Array(U)[1, :, :], (2, 1)), (2, 1)), 1, ny, nlevels)) 
 
   # Compute PV inversion matrix
   typeofSkl = SArray{Tuple{nlevels, nlevels}, T, 2, nlevels^2} # StaticArrays of type T and dims = (nlevels, nlevels)
