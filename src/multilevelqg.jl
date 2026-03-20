@@ -257,7 +257,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   calcF!(F, f₀, H₀, N², nlevels)
 
   # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
-  Qy_2D = reshape(view(U, 1, :, :), ny, nlevels) * permutedims(A(F), (2, 1))
+  Qy_2D = reshape(selectdim(U, 1, 1), ny, nlevels) * permutedims(A(F), (2, 1))
   @views @. Qy -= reshape(Qy_2D, 1, ny, nlevels)
 
   # Compute PV inversion matrix
