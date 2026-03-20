@@ -120,7 +120,7 @@ function Problem(nlevels::Int,                                     # number of l
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlevels, f₀, β, H₀, z, N², U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, H₀, N², U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -146,8 +146,6 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
          β :: T
     "extent of the ``z``-domain"
          H₀ :: T
-    "tuple of Chebyshev levels"
-          z :: Tuple
     "tuple with background stratification at Chebyshev levels"
          N² :: Tuple
     "array with background constant zonal flow ``U(y)`` at Chebyshev levels"
@@ -166,6 +164,8 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
    calcFq! :: Function
 
   # derived params
+      "tuple of Chebyshev levels"
+          z :: Tuple
     "array containing ``x``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to topography"
         Qx :: Aphys3D
     "array containing ``y``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to ``β``, ``U``, and topography"
@@ -212,7 +212,7 @@ function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   return A(U_3D)
 end
 
-function Params(nlevels::Int, f₀, β, H₀, z, N², U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
+function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
@@ -270,7 +270,7 @@ function Params(nlevels::Int, f₀, β, H₀, z, N², U, eta, topographic_gradie
 
   S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(z)), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
