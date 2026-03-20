@@ -253,11 +253,11 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels), [1, 2]; flags=effort)
 
   # Compute vertical derivative matrix
-  F = zeros(dev, T, (nlevels, nlevels))
+  F = zeros(T, (nlevels, nlevels))
   calcF!(F, f₀, H₀, N², nlevels)
 
   # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
-  Qy_2D = reshape(view(U, 1, :, :), ny, nlevels) * F'
+  Qy_2D = reshape(view(U, 1, :, :), ny, nlevels) * permutedims(A(F), (2, 1))
   @views @. Qy -= reshape(Qy_2D, 1, ny, nlevels)
 
   # Compute PV inversion matrix
