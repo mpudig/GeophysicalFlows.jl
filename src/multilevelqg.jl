@@ -292,7 +292,7 @@ function hyperviscosity(params, grid)
   dev = grid.device
   T = eltype(grid)
 
-  L = device_array(dev){T}(undef, (grid.nkr, grid.nl, numberoflevels(params) + 2))
+  L = device_array(dev){T}(undef, (grid.nkr, grid.nl, numberoflevels(params)))
   @. L = - params.ν * grid.Krsq^params.nν
   @views @. L[1, 1, :] = 0
 
