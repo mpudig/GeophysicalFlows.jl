@@ -37,11 +37,11 @@ nothingfunction(args...) = nothing
                          Ly = Lx,
                          f₀ = 1.0,
                           β = 0.0,
-                          U = zeros(nlevels + 2),
-                          H = 1/nlevels * ones(nlevels),
-                          N² = -(1 .+ 1/nlevels+1 * (0:nlevels+1)),
+                          H₀ = 1.0,
+                          U = zeros(nlevels),
+                          N² = pi .* ones(nlevels),
                         eta = nothing,
-    topographic_gradient = (0, 0),
+       topographic_gradient = (0, 0),
                           r = 0,
                           ν = 0,
                          nν = 1,
@@ -53,11 +53,13 @@ nothingfunction(args...) = nothing
            aliased_fraction = 1/3,
                           T = Float64)
 
-Construct a multi-level quasi-geostrophic problem with `nlevels` interior levels on device `dev`.
+Construct a multi-level quasi-geostrophic problem with `nlevels` levels (including surface buoyancy levels) on device `dev`.
+The vertical is discretized using the Chebyshev collocation method. The vertical grid is thus defined by the Chebyshev grid,
+which depends on H₀ and nlevels.
 
 Arguments
 =========
-- `nlevels`: (required) Number of interior levels.
+- `nlevels`: (required) Number of levels.
 - `dev`: (required) `CPU()` (default) or `GPU()`; computer architecture used to time-step `problem`.
 
 Keyword arguments
@@ -67,10 +69,10 @@ Keyword arguments
   - `Lx`: Extent of the ``x``-domain.
   - `Ly`: Extent of the ``y``-domain.
   - `f₀`: Constant planetary vorticity.
-  - `β`: Planetary vorticity ``y``-gradient.
-  - `U`: Imposed background constant zonal flow ``U(y)`` at each level (upper surface level, interior levels, and lower surface level).
-  - `H`: Rest height between half-index levels.
-  - `N²`: Background buoyancy frequency at half-index levels.
+  - `β`:  Planetary vorticity ``y``-gradient.
+  - `H₀`: Extent of the ``z''-domain.
+  - `U`:  Background constant zonal flow ``U(y)`` at Chebyshev levels.
+  - `N²`: Background stratification at Chebyshev levels.
   - `eta`: Periodic component of the bathymetry.
   - `topographic_gradient`: The ``(x, y)`` components of the topographic large-scale gradient.
   - `r`: Linear bottom drag coefficient.
@@ -84,7 +86,7 @@ Keyword arguments
   - `aliased_fraction`: the fraction of high wavenumbers that are zero-ed out by `dealias!()`.
   - `T`: `Float32` or `Float64` (default); floating point type used for `problem` data.
 """
-function Problem(nlevels::Int,                                     # number of interior levels
+function Problem(nlevels::Int,                                     # number of levels
                           dev = CPU();
               # Numerical parameters
                            nx = 128,
@@ -94,11 +96,11 @@ function Problem(nlevels::Int,                                     # number of i
               # Physical parameters
                            f₀ = 1.0,                               # Coriolis parameter
                             β = 0.0,                               # y-gradient of Coriolis parameter
-                            U = zeros(nlevels + 2),                # imposed zonal flow U(y) at each level
-                            H = 1/nlevels * ones(nlevels),         # rest height between half-index levels
-                            N² = 1/nlevels^2 * ones(nlevels + 1),  # Background buoyancy frequency at half-index levels
+                           H₀ = 1.0,                               # extent of the ``z''-domain.
+                            U = zeros(nlevels),                    # background constant zonal flow ``U(y)`` at Chebyshev levels
+                           N² = pi .* ones(nlevels),               # background stratification at Chebyshev levels
                           eta = nothing,                           # periodic component of the bathymetry
-      topographic_gradient = (0, 0),                               # tuple with the ``(x, y)`` components of topographic large-scale gradient
+         topographic_gradient = (0, 0),                            # tuple with the ``(x, y)`` components of topographic large-scale gradient
               # Bottom Drag and/or (hyper)-viscosity
                             r = 0,
                             ν = 0,
@@ -118,7 +120,7 @@ function Problem(nlevels::Int,                                     # number of i
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlevels, f₀, β, N², H, U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, H₀, z, N², U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -136,17 +138,19 @@ $(TYPEDFIELDS)
 """
 struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   # prescribed params
-    "number of interior levels"
+    "number of levels"
    nlevels :: Int
     "constant planetary vorticity"
         f₀ :: T
     "planetary vorticity ``y``-gradient"
          β :: T
-    "tuple with background buoyancy frequency at half-index levels"
+    "extent of the ``z``-domain"
+         H₀ :: T
+    "tuple of Chebyshev levels"
+          z :: Tuple
+    "tuple with background stratification at Chebyshev levels"
          N² :: Tuple
-    "tuple with rest height between half-index levels"
-         H :: Tuple
-    "array with imposed constant zonal flow ``U(y)`` at each level (surfaces and interior levels)"
+    "array with background constant zonal flow ``U(y)`` at Chebyshev levels"
          U :: Aphys3D
     "array containing the bathymetry"
        eta :: Aphys2D
@@ -162,9 +166,9 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
    calcFq! :: Function
 
   # derived params
-    "array containing ``x``-gradient of generalized PV due to topographic PV at upper surface, lower surface and interior levels"
+    "array containing ``x``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to topography"
         Qx :: Aphys3D
-    "array containing ``y``-gradient of generalized PV due to ``β``, ``U``, and topographic PV at upper surface, lower surface and interior levels"
+    "array containing ``y``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to ``β``, ``U``, and topography"
         Qy :: Aphys3D
     "array containing coefficients for getting PV from streamfunction"
          S :: Atrans4D
@@ -177,8 +181,8 @@ end
 function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 1}) where TU
   T = eltype(grid)
 
-  if length(U) == nlevels + 2
-    U_2D = zeros(dev, T, (1, nlevels + 2))
+  if length(U) == nlevels
+    U_2D = zeros(dev, T, (1, nlevels))
     U_2D[:] = U
     U_2D = repeat(U_2D, outer=(grid.ny, 1))
   else
@@ -186,7 +190,7 @@ function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 1}) where TU
     U_2D[:] = U
   end
 
-  U_3D = zeros(dev, T, (1, grid.ny, nlevels + 2))
+  U_3D = zeros(dev, T, (1, grid.ny, nlevels))
   @views U_3D[1, :, :] = U_2D
 
   return U_3D
@@ -194,7 +198,7 @@ end
 
 function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 2}) where TU
   T = eltype(grid)
-  U_3D = zeros(dev, T, (1, grid.ny, nlevels + 2))
+  U_3D = zeros(dev, T, (1, grid.ny, nlevels))
   @views U_3D[1, :, :] = U
 
   return U_3D
@@ -203,12 +207,12 @@ end
 function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   T = eltype(grid)
   A = device_array(dev)
-  U_3D = reshape(repeat([T(U)], outer=(grid.ny, 1)), (1, grid.ny, nlevels + 2))
+  U_3D = reshape(repeat([T(U)], outer=(grid.ny, 1)), (1, grid.ny, nlevels))
 
   return A(U_3D)
 end
 
-function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
+function Params(nlevels::Int, f₀, β, H₀, z, N², U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
@@ -217,6 +221,10 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
   ny, nx = grid.ny, grid.nx
   nkr, nl = grid.nkr, grid.nl
   kr, l  = grid.kr, grid.l
+
+  # Chebyshev grid on [–H₀, 0]
+  ξ = [cos((i - 1) * pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
+  z = H₀ / 2 .* (ξ .- 1)                                      # maps [-1, 1] -> [-H₀, 0]
 
   U = convert_U_to_U3D(dev, nlevels, grid, U)
 
@@ -233,50 +241,36 @@ function Params(nlevels::Int, f₀, β, N², H, U, eta, topographic_gradient, r,
   @. etax += topographic_gradient[1]
   @. etay += topographic_gradient[2]
 
-  # Add everything to background generalized PV gradients, except part coming from vertical shear   
-  Qx = zeros(dev, T, (nx, ny, nlevels + 2))
+  # Add everything to background buoyancy/PV gradients, except part coming from vertical shear   
+  Qx = zeros(dev, T, (nx, ny, nlevels))
   @views @. Qx[:, :, end] += N²[end] * etax
 
-  Qy = zeros(dev, T, (nx, ny, nlevels + 2))
+  Qy = zeros(dev, T, (nx, ny, nlevels))
   β_T = T(β) # T(β) ensures that Qy remains same type as U
   @views @. Qy[:, :, 2 : end - 1] = β_T - Uyy 
   @views @. Qy[:, :, end] += N²[end] * etay
 
-  rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels + 2), [1, 2]; flags=effort)
+  rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels), [1, 2]; flags=effort)
 
-  H = Tuple(T.(H))
+  # Compute vertical derivative matrix
+  F = zeros(dev, T, (nlevels, nlevels))
+  calcF!(F, f₀, H₀, N², nlevels)
 
-  δ = zeros(T, nlevels + 1) # height of jumps between integer levels
-  δ[1] = 0.5 * (H[1] + H[2])
-  @. δ[2 : end - 1] = 0.5 * (H[1 : end - 1] + H[2 : end])
-  δ[end] = 0.5 * (H[end - 1] + H[end])
+  # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
+  mul!(reshape(Qy, :, nlevels), reshape(U, :, nlevels), F', T(-1), T(1)) 
 
-  Fm = @. T(f₀^2 / (N²[1 : end - 1] * δ[1 : end - 1] * H))    # PV stretching part (lower diagonal)
-  Fp = @. T(f₀^2 / (N²[2 : end] * δ[2 : end] * H))            # PV stretching part (upper diagonal)
-  Fup = T(f₀ / δ[1])                                          # upper buoyancy part
-  Flo = T(f₀ / δ[end])                                        # lower buoyancy part
+  # Compute PV inversion matrix
+  typeofSkl = SArray{Tuple{nlevels, nlevels}, T, 2, nlevels^2} # StaticArrays of type T and dims = (nlevels, nlevels)
 
-typeofSkl = SArray{Tuple{nlevels + 2, nlevels + 2}, T, 2, (nlevels + 2)^2} # StaticArrays of type T and dims = (nlevels + 2, nlevels + 2)
+  S = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
+  calcS!(S, F, nlevels, grid)
 
-S = Array{typeofSkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
-calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
+  S⁻¹ = Array{typeofSkl, 2}(undef, (nkr, nl))  # Array of StaticArrays
+  calcS⁻¹!(S⁻¹, F, nlevels, grid)
 
-S⁻¹ = Array{typeofSkl, 2}(undef, (nkr, nl))  # Array of StaticArrays
-calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
+  S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
-
-# Second order accurate discretization of \partial_y B at the boundaries and \partial_y Q in the interior:
-# NB: U = [U_1/2, U_1, ..., U_N, U_N+1/2]
-@views @. Qy[:, :, 1] -= Fup * 1/3 * (-8 * U[:, :, 1] + 9 * U[:, :, 2] - U[:, :, 3])
-@views @. Qy[:, :, 2] -= Fp[1] * (U[:, :, 3] - U[:, :, 2]) - 2 * Fm[1] * (U[:, :, 2] - U[:, :, 1])
-for j = 3 : nlevels
-    @views @. Qy[:, :, j] -= Fp[j - 1] * (U[:, :, j + 1] - U[:, :, j]) - Fm[j - 1] * (U[:, :, j] - U[:, :, j - 1])
-end
-@views @. Qy[:, :, nlevels + 1] -= 2 * Fp[nlevels] * (U[:, :, nlevels + 2] - U[:, :, nlevels + 1]) - Fm[nlevels] * (U[:, :, nlevels + 1] - U[:, :, nlevels])
-@views @. Qy[:, :, nlevels + 2] -= Flo * 1/3 * (U[:, :, nlevels] - 9 * U[:, :, nlevels + 1] + 8 * U[:, :, nlevels + 2])
-
-  return Params(nlevels, T(f₀), T(β), Tuple(T.(N²)), T.(H), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(z)), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Qx, Qy, S, S⁻¹, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -289,7 +283,7 @@ numberoflevels(params) = params.nlevels
     hyperviscosity(params, grid)
 
 Return the linear operator `L` that corresponds to (hyper)-viscosity of order ``n_ν`` with
-coefficient ``ν`` on the ``nlevels + 2'' interior and surface levels
+coefficient ``ν`` on the ``nlevels'' interior and surface levels
 ```math
 L_j = - ν |𝐤|^{2 n_ν}, \\ j = 1, ..., n .
 ```
@@ -348,7 +342,7 @@ The variables for multi-level QG problem.
 $(FIELDS)
 """
 struct Vars{Aphys, Atrans, F, P} <: AbstractVars
-    "upper surface buoyancy, interior PV, lower surface buoyancy (generalized PV)"
+    "upper surface buoyancy, interior PV, lower surface buoyancy"
         q :: Aphys
     "streamfunction"
         ψ :: Aphys
@@ -384,8 +378,8 @@ function DecayingVars(grid, params)
   T = eltype(grid)
   nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh
+  @devzeros Dev T (grid.nx, grid.ny, nlevels) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels) qh ψh uh vh
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, nothing, nothing)
 end
@@ -400,8 +394,8 @@ function ForcedVars(grid, params)
   T = eltype(grid)
   nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh Fqh
+  @devzeros Dev T (grid.nx, grid.ny, nlevels) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels) qh ψh uh vh Fqh
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, Fqh, nothing)
 end
@@ -416,8 +410,8 @@ function StochasticForcedVars(grid, params)
   T = eltype(grid)
   nlevels = numberoflevels(params)
 
-  @devzeros Dev T (grid.nx, grid.ny, nlevels + 2) q ψ u v
-  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels + 2) qh ψh uh vh Fqh prevsol
+  @devzeros Dev T (grid.nx, grid.ny, nlevels) q ψ u v
+  @devzeros Dev Complex{T} (grid.nkr, grid.nl, nlevels) qh ψh uh vh Fqh prevsol
 
   return Vars(q, ψ, u, v, qh, ψh, uh, vh, Fqh, prevsol)
 end
@@ -446,7 +440,7 @@ matrix multiplication
 y = M x
 ```
 
-for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels + 2`.
+for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels`.
 This can be used to perform `qh = params.S * ψh` or `ψh = params.S⁻¹ qh`.
 
 StaticVectors are used to efficiently perform the matrix-vector multiplication.
@@ -490,7 +484,7 @@ function pvfromstreamfunction!(qh, ψh, params, grid)
 
   # Launch the kernel
   S, nlevels = params.S, params.nlevels
-  kernel!(qh, S, ψh, Val(nlevels + 2))
+  kernel!(qh, S, ψh, Val(nlevels))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
@@ -521,7 +515,7 @@ function streamfunctionfrompv!(ψh, qh, params, grid)
 
   # Launch the kernel
   S⁻¹, nlevels = params.S⁻¹, params.nlevels
-  kernel!(ψh, S⁻¹, qh, Val(nlevels + 2))
+  kernel!(ψh, S⁻¹, qh, Val(nlevels))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
@@ -530,21 +524,16 @@ function streamfunctionfrompv!(ψh, qh, params, grid)
 end
 
 """
-    calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
+    calcS!(S, F, nlevels, grid)
 
-Construct the array ``𝕊``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``𝕊_𝐤`` that
+Construct the array ``𝕊``, which consists of `nlevels` x `nlevels` static arrays ``𝕊_𝐤`` that
 relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``q̂_𝐤 = 𝕊_𝐤 ψ̂_𝐤``.
 """
-function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal([Fm; 0], -([0; Fp; 0] + [0; Fm; 0]), [0; Fp]))
-  F[1, 1] = Fup
-  F[1, 2] = -Fup
-  F[end, end - 1] = Flo
-  F[end, end] = -Flo
+function calcS!(S, F, nlevels, grid)
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n]
-    Skl = SMatrix{nlevels + 2, nlevels + 2}(diagm([0; fill(-k², nlevels); 0]) + F)  # subtracts off vorticity part only in the interior
+    Skl = SMatrix{nlevels, nlevels}(diagm([0; fill(-k², nlevels - 2); 0]) + F)  # subtracts off vorticity part only in the interior
     S[m, n] = Skl
   end
 
@@ -552,28 +541,61 @@ function calcS!(S, Fp, Fm, Fup, Flo, nlevels, grid)
 end
 
 """
-    calcS⁻¹!(S, Fp, Fm, Fup, Flo, nlevels, grid)
+    calcS⁻¹!(S, F, nlevels, grid)
 
-Construct the array ``𝕊⁻¹``, which consists of `nlevels + 2` x `nlevels + 2` static arrays ``(𝕊_𝐤)⁻¹``
+Construct the array ``𝕊⁻¹``, which consists of `nlevels` x `nlevels` static arrays ``(𝕊_𝐤)⁻¹``
 that relate the ``q̂_j``'s and ``ψ̂_j``'s for every wavenumber: ``ψ̂_𝐤 = (𝕊_𝐤)⁻¹ q̂_𝐤``.
 """
-function calcS⁻¹!(S⁻¹, Fp, Fm, Fup, Flo, nlevels, grid)
-  F = Matrix(Tridiagonal([Fm; 0], -([0; Fp; 0] + [0; Fm; 0]), [0; Fp]))
-  F[1, 1] = Fup
-  F[1, 2] = -Fup
-  F[end, end - 1] = Flo
-  F[end, end] = -Flo
+function calcS⁻¹!(S⁻¹, F, nlevels, grid)
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Skl = diagm([0; fill(-k², nlevels); 0]) + F                         # subtracts off vorticity part only in the interior
-    S⁻¹[m, n] = SMatrix{nlevels + 2, nlevels + 2}(I / Skl)
+    Skl = diagm([0; fill(-k², nlevels - 2); 0]) + F                         # subtracts off vorticity part only in the interior
+    S⁻¹[m, n] = SMatrix{nlevels, nlevels}(I / Skl)
   end
 
   T = eltype(grid)
-  S⁻¹[1, 1] = SMatrix{nlevels + 2, nlevels + 2}(zeros(T, (nlevels + 2, nlevels + 2)))
+  S⁻¹[1, 1] = SMatrix{nlevels, nlevels}(zeros(T, (nlevels, nlevels)))
 
   return nothing
+end
+
+"""
+    calcF!(F, f₀, H₀, N², nlevels)
+
+Construct the `nlevels` x `nlevels` array ``F`` that discretizes the vertical component of the PV inversion.
+
+"""
+
+function calcF!(F, f₀, H₀, N², nlevels)
+    # Chebyshev nodes
+    ξ = [cos((i - 1)* pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
+    z = H₀ / 2 .* (ξ .- 1)                                      # maps [-1, 1] -> [-H₀, 0]
+    
+    # Chebyshev differentiation matrix D
+    c = ones(nlevels)
+    c[1] = 2
+    c[nlevels] = 2
+    D = zeros(nlevels, nlevels)
+    for i in 1 : nlevels, j in 1 : nlevels
+        if i ≠ j
+            D[i, j] = (c[i] / c[j]) * (-1)^(i + j) / (ξ[i] - ξ[j])
+        end
+    end
+    # Diagonal entries to ensure that rows sum to zero (-> constant vectors in null space)
+    for i in 1 : nlevels
+        D[i, i] = -sum(D[i, j] for j in 1 : nlevels if j ≠ i)
+    end
+    
+    # Scale to [-H₀, 0] grid
+    D = 2 / H₀ * D
+    
+    # Build F
+    @views F[1, :] = f₀ * D[1, :]
+    @views F[nlevels, :] = f₀ * D[nlevels, :]
+    @views F[2 : nlevels - 1, :] = (D .* (f₀^2 ./ N²)' * D)[2 : nlevels - 1, :]
+    
+    return nothing
 end
 
 # -------
@@ -639,9 +661,6 @@ function calcN_advection!(N, sol, vars, params, grid)
 
   streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
 
-  @views @. vars.ψh[:, :, 1] = 0.5 * (vars.ψh[:, :, 1] + vars.ψh[:, :, 2])           # advecting ψ on upper boundary is average of ψ_0 and ψ_1
-  @views @. vars.ψh[:, :, end] = 0.5 * (vars.ψh[:, :, end - 1] + vars.ψh[:, :, end]) # advecting ψ on lower boundary is average of ψ_N and ψ_N+1
-
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
@@ -690,9 +709,6 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
   @. vars.qh = sol
 
   streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
-
-  @views @. vars.ψh[:, :, 1] = 0.5 * (vars.ψh[:, :, 1] + vars.ψh[:, :, 2])           # advecting ψ on upper boundary is average of ψ_0 and ψ_1
-  @views @. vars.ψh[:, :, end] = 0.5 * (vars.ψh[:, :, end - 1] + vars.ψh[:, :, end]) # advecting ψ on lower boundary is average of ψ_N and ψ_N+1
 
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
