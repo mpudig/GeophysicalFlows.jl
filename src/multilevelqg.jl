@@ -132,13 +132,13 @@ function Problem(nlevels::Int,                                     # number of l
 end
 
 """
-    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
+    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
 
 The parameters for the `MultiLevelQG` problem.
 
 $(TYPEDFIELDS)
 """
-struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
+struct Params{T, Aphys3D, Aphys2D_CPU, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
   # prescribed params
     "number of levels"
    nlevels :: Int
@@ -153,7 +153,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractPar
     "array with background constant zonal flow ``U(y)`` at Chebyshev levels"
          U :: Aphys3D
     "array containing the bathymetry"
-       eta :: Aphys2D
+       eta :: Aphys2D_CPU
     "tuple containing the ``(x, y)`` components of topographic large-scale gradient"
     topographic_gradient :: Tuple{T, T}
     "linear bottom drag coefficient"
@@ -167,7 +167,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractPar
 
   # derived params
       "tuple of Chebyshev levels"
-          z :: Tuple
+         z :: Tuple
     "array containing ``x``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to topography"
         Qx :: Aphys3D
     "array containing ``y``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to ``β``, ``U``, and topography"
@@ -179,7 +179,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractPar
     "array containing coefficients for inverting the interior omega equation for vertical velocity"
        M⁻¹ :: Atrans4D_int
     "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
-       D :: Aphys2D
+         D :: Aphys2D
     "rfft plan for FFTs"
   rfftplan :: Trfft
 end
