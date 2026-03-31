@@ -6,6 +6,7 @@ export
   streamfunctionfrompv!,
   pvfromstreamfunction!,
   bfromstreamfunction!,
+  wfromstreamfunction!,
   updatevars!,
 
   set_q!,
@@ -175,6 +176,8 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
          S :: Atrans4D
     "array containing coefficients for inverting PV to streamfunction"
        S⁻¹ :: Atrans4D
+    "array containing coefficients for inverting omega equation for vertical velocity"
+       M⁻¹ :: Atrans4D
     "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
        D :: Aphys2D
     "rfft plan for FFTs"
@@ -275,10 +278,18 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   S⁻¹ = Array{typeofSkl, 2}(undef, (nkr, nl))  # Array of StaticArrays
   calcS⁻¹!(S⁻¹, F, nlevels, grid)
 
-  S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
-  D = A(D)              # convert to appropriate ArrayType
+  # Compute omega equation inversion matrix
+  typeofMkl = SArray{Tuple{nlevels - 2, nlevels - 2}, T, 2, (nlevels - 2)^2} # StaticArrays of type T and dims = (nlevels - 2, nlevels - 2)
 
-  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, D, rfftplanlayered)
+  M⁻¹ = Array{typeofMkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
+  calcM⁻¹!(M⁻¹, params, grid)
+
+  # Convert to appropriate ArrayType
+  S, S⁻¹ = A(S), A(S⁻¹)
+  M⁻¹ = A(M⁻¹)
+  D = A(D)
+
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, M⁻¹, D, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -528,7 +539,7 @@ Kernel for matrix-vector multiplication at given wavenumber. The kernel performs
 y = M x
 ```
 
-for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels`.
+for every wavenumber, where ``y`` and ``x`` are column-vectors of length `N`.
 This can be used to perform the PV inversion, e.g., `qh = params.S * ψh` or `ψh = params.S⁻¹ qh`.
 It is also used to find the vertical velocity via the omega equation, e.g., `wh = params.M⁻¹ rhsh`.
 
@@ -623,6 +634,71 @@ function bfromstreamfunction!(b, ψ, params, grid)
   D = params.D
 
   @views b = f₀ .* (reshape(D * reshape(ψ, 4, :), size(ψ)))
+
+  return nothing
+end
+
+"""
+    calcM⁻¹!(M⁻¹, params, grid)
+
+Construct the array ``M⁻¹``, which consists of `nlevels - 2` x `nlevels - 2` static arrays ``(M_𝐤)⁻¹``
+that relate the ``ŵ_j``'s and ``f̂_j``'s for every wavenumber: ``ŵ_𝐤 = (M_𝐤)⁻¹ f̂_𝐤``,
+where ``f̂'' represents the forcing in the interior part of the omega equation. 
+"""
+function calcM⁻¹!(M⁻¹, params, grid)
+  nlevels = params.nlevels
+  f₀ = params.f₀
+  N² = collect(params.N²)[2 : end - 1]
+  D = Array(params.D)
+
+  # Compute the linear operator in the omega equation
+  D² = (D * D)[2 : end - 1, 2 : end - 1]
+  for n=1:grid.nl, m=1:grid.nkr
+    k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
+    Mkl = -k² * diagm(N²) + (f₀ * D²)
+    M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(Mkl)
+  end
+
+  T = eltype(grid)
+  M⁻¹[1, 1] = SMatrix{nlevels - 2, nlevels - 2}(zeros(T, (nlevels - 2, nlevels - 2)))
+
+  return nothing
+end
+
+"""
+    wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
+
+Obtain the Fourier transform of the vertical velocity `wh` at each level from the omega equation given
+  - the Fourier transform of the upper boundary condition at `z = 0`,
+  - the Fourier transform of the bottom boundary condition at `z = -H`, and
+  - the Fourier transform of the forcing in the interior `–H < z < 0`
+by doing `wh = params.M⁻¹ * rhsh` in the interior, `wh = wtoph` at `z = 0`, and `wh = wboth` at `z = -H`.
+
+The matrix multiplications are done via launching a kernel. We use a work layout over
+which the kernel is launched.
+"""
+function wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
+  # Larger workgroups are generally more efficient. For more generality, we could put an
+  # if statement that incurs different behavior when either nkl or nl are less than 8.
+  workgroup = 8, 8
+
+  # The worksize determines how many times the kernel is run
+  worksize = grid.nkr, grid.nl
+
+  # Instantiates the kernel for relevant backend device
+  backend = KernelAbstractions.get_backend(wh)
+  kernel! = inversion_kernel!(backend, workgroup, worksize)
+
+  # Launch the kernel
+  M⁻¹, nlevels = params.M⁻¹, params.nlevels
+  kernel!(wh[:, :, 2 : end - 1], M⁻¹, rhsh, Val(nlevels - 2))
+
+  # Ensure that no other operations occur until the kernel has finished
+  KernelAbstractions.synchronize(backend)
+
+  # Prescribe upper and lower boundary conditions
+  @views wh[:, :, 1] = wtoph
+  @views wh[:, :, end] = wboth
 
   return nothing
 end
