@@ -762,7 +762,7 @@ function wfromstreamfunction!(wh, prob)
   vζh = vars.vh  # use vars.vh as scratch varaible
   fwdtransform!(vζh, Fy, params)
 
-  @views rhsh .= params.f₀ * permutedims(reshape(D * reshape(permutedims(im * grid.kr .* uζh .+ im * grid.l .* vζh, (3, 1, 2)), nlevels, nkr * nl), nlevels, nkr, nl), (2, 3, 1))[:, :, 2 : end - 1]
+  @views rhsh .= params.f₀ * permutedims(reshape(params.D * reshape(permutedims(im * grid.kr .* uζh .+ im * grid.l .* vζh, (3, 1, 2)), nlevels, nkr * nl), nlevels, nkr, nl), (2, 3, 1))[:, :, 2 : end - 1]
 
   # Buoyancy part
   @. Fx = vars.u * b
