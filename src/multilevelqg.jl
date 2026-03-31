@@ -282,7 +282,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   typeofMkl = SArray{Tuple{nlevels - 2, nlevels - 2}, T, 2, (nlevels - 2)^2} # StaticArrays of type T and dims = (nlevels - 2, nlevels - 2)
 
   M⁻¹ = Array{typeofMkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
-  calcM⁻¹!(M⁻¹, params, grid)
+  calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 
   # Convert to appropriate ArrayType
   S, S⁻¹ = A(S), A(S⁻¹)
@@ -639,23 +639,19 @@ function bfromstreamfunction!(b, ψ, params, grid)
 end
 
 """
-    calcM⁻¹!(M⁻¹, params, grid)
+    calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 
 Construct the array ``M⁻¹``, which consists of `nlevels - 2` x `nlevels - 2` static arrays ``(M_𝐤)⁻¹``
 that relate the ``ŵ_j``'s and ``f̂_j``'s for every wavenumber: ``ŵ_𝐤 = (M_𝐤)⁻¹ f̂_𝐤``,
 where ``f̂'' represents the forcing in the interior part of the omega equation. 
 """
-function calcM⁻¹!(M⁻¹, params, grid)
-  nlevels = params.nlevels
-  f₀ = params.f₀
-  N² = collect(params.N²)[2 : end - 1]
-  D = Array(params.D)
+function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
+  D²_int = (D * D)[2 : end - 1, 2 : end - 1]
+  N²_int = N²[2 : end - 1]
 
-  # Compute the linear operator in the omega equation
-  D² = (D * D)[2 : end - 1, 2 : end - 1]
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Mkl = -k² * diagm(N²) + (f₀ * D²)
+    Mkl = -k² * diagm(N²_int) + (f₀ * D²_int)
     M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(Mkl)
   end
 
