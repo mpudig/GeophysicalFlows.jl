@@ -627,13 +627,16 @@ end
     bfromstreamfunction!(b, ψ, params, grid)
 
 Obtain the buoyancy `b` from the streamfunction `ψ` at each level using
-`b = params.f₀ * params.D * ψ`.
+`b = params.f₀ * params.D * ψ`,
+i.e., matrix-vector multiplication at each horizontal grid point.
 """
 function bfromstreamfunction!(b, ψ, params, grid)
   f₀ = params.f₀
   D = params.D
+  nlevels = params.nlevels
+  nx, ny = grid.nx, grid.ny
 
-  @views b = f₀ .* (reshape(D * reshape(ψ, 4, :), size(ψ)))
+  b .= f₀ * permutedims(reshape(D * reshape(permutedims(ψ, (3, 1, 2)), nlevels, nx * ny), nlevels, nx, ny), (2, 3, 1))
 
   return nothing
 end
@@ -697,6 +700,82 @@ function wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
   @views wh[:, :, end] = wboth
 
   return nothing
+end
+
+"""
+    wfromstreamfunction!(wh, prob)
+
+Obtain the Fourier transform of the vertical velocity `wh` at each level from the full omega equation
+(interior forcing and non-zero boundary conditions) by computing terms from variables stored in prob.
+
+"""
+function wfromstreamfunction!(wh, prob) 
+  sol, vars, params, grid = prob.sol, prob.vars, prob.params, prob.grid
+  A = device_array(grid.device)
+  nkr = grid.nkr
+  nl = grid.nl
+  nlevels = params.nlevels
+
+  # Update and compute relevant variables
+  @. vars.qh = sol
+
+  streamfunctionfrompv!(vars.ψh, vars.qh, params, grid)
+  invtransform!(vars.ψ, vars.ψh, params)
+
+  @. vars.uh = -im * grid.l  * vars.ψh
+  @. vars.vh =  im * grid.kr * vars.ψh
+
+  invtransform!(vars.u, vars.uh, params)
+  invtransform!(vars.v, vars.vh, params)
+
+  b = vars.q      # use vars.q as scratch variable
+  bfromstreamfunction!(b, vars.ψ, params, grid)
+
+  ζh = vars.uh    # use vars.uh as scratch variable
+  @. ζh = -grid.Krsq * vars.ψh
+  ζ = vars.ψ      # use vars.ψ as scratch variable
+  invtransform!(ζ, ζh, params)
+
+  # Upper BC: w = 0 at z = 0
+  wtoph = A(zeros(eltype(vars.qh), nkr, nl))
+
+  # Lower BC: w = rζ + J(ψ, h) at z = -H
+  wboth = similar(vars.qh, nkr, nl)
+
+  @views wboth .= -params.r * ζh[:, :, end]
+  @views wboth .+= im * grid.kr .* rfft(vars.u[:, :, end] .* params.eta) .+
+                   im * grid.l  .* rfft(vars.v[:, :, end] .* params.eta)
+
+  ## Interior RHS forcing for -H < z < 0
+  rhsh = similar(vars.qh, nkr, nl, nlevels - 2)
+
+  # Scratch variables
+  Fx = similar(vars.u)
+  Fy = similar(vars.v)
+
+  # Vorticity part
+  @. Fx = vars.u * ζ
+  uζh = vars.uh  # use vars.uh as scratch varaible
+  fwdtransform!(uζh, Fx, params)
+
+  @. Fy = vars.v * ζ
+  vζh = vars.vh  # use vars.vh as scratch varaible
+  fwdtransform!(vζh, Fy, params)
+
+  @views rhsh .= params.f₀ * permutedims(reshape(D * reshape(permutedims(im * grid.kr .* uζh .+ im * grid.l .* vζh, (3, 1, 2)), nlevels, nkr * nl), nlevels, nkr, nl), (2, 3, 1))[:, :, 2 : end - 1]
+
+  # Buoyancy part
+  @. Fx = vars.u * b
+  ubh = vars.uh  # use vars.uh as scratch varaible
+  fwdtransform!(ubh, Fx, params)
+
+  @. Fy = vars.v * b
+  vbh = vars.vh  # use vars.vh as scratch varaible
+  fwdtransform!(vbh, Fy, params)
+
+  @views @. rhsh .+= grid.Krsq * (im * grid.kr * ubh + im * grid.l * vbh)[:, :, 2 : end - 1]
+
+  return wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
 end
 
 # -------
