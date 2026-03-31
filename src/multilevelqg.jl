@@ -257,7 +257,6 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   # Compute vertical derivative matrix
   D = zeros(T, (nlevels, nlevels))
   calcD!(D, H₀, nlevels)
-  D = A(D)  # convert to appropriate ArrayType
 
   # Compute vertical part of PV inversion matrix
   F = zeros(T, (nlevels, nlevels))
@@ -276,6 +275,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   calcS⁻¹!(S⁻¹, F, nlevels, grid)
 
   S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
+  D = A(D)              # convert to appropriate ArrayType
 
   return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, D, rfftplanlayered)
 end
