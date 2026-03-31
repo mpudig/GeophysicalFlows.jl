@@ -5,6 +5,7 @@ export
   invtransform!,
   streamfunctionfrompv!,
   pvfromstreamfunction!,
+  bfromstreamfunction!,
   updatevars!,
 
   set_q!,
@@ -607,6 +608,21 @@ function streamfunctionfrompv!(ψh, qh, params, grid)
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
+
+  return nothing
+end
+
+"""
+    bfromstreamfunction!(b, ψ, params, grid)
+
+Obtain the buoyancy `b` from the streamfunction `ψ` at each level using
+`b = params.f₀ * params.D * ψ`.
+"""
+function bfromstreamfunction!(b, ψ, params, grid)
+  f₀ = params.f₀
+  D = params.D
+
+  @views b = f₀ .* (reshape(D * reshape(ψ, 4, :), size(ψ)))
 
   return nothing
 end
