@@ -174,6 +174,8 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
          S :: Atrans4D
     "array containing coefficients for inverting PV to streamfunction"
        S⁻¹ :: Atrans4D
+    "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
+       D :: Aphys2D
     "rfft plan for FFTs"
   rfftplan :: Trfft
 end
@@ -224,7 +226,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
 
   # Chebyshev grid on [–H₀, 0]
   ξ = [cos((i - 1) * pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
-  z = H₀ / 2 .* (ξ .- 1)                                      # maps [-1, 1] -> [-H₀, 0]
+  z = H₀ / 2 .* (ξ .- 1)                                       # maps [-1, 1] -> [-H₀, 0]
 
   U = convert_U_to_U3D(dev, nlevels, grid, U)
 
@@ -253,8 +255,13 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   rfftplanlayered = plan_flows_rfft(A{T, 3}(undef, grid.nx, grid.ny, nlevels), [1, 2]; flags=effort)
 
   # Compute vertical derivative matrix
+  D = zeros(T, (nlevels, nlevels))
+  calcD!(D, H₀, nlevels)
+  D = A(D)  # convert to appropriate ArrayType
+
+  # Compute vertical part of PV inversion matrix
   F = zeros(T, (nlevels, nlevels))
-  calcF!(F, f₀, H₀, N², nlevels)
+  calcF!(F, D, f₀, N²)
 
   # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
   Qy .-= A(reshape(permutedims(F * permutedims(Array(U)[1, :, :], (2, 1)), (2, 1)), 1, ny, nlevels)) 
@@ -270,7 +277,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
 
   S, S⁻¹ = A(S), A(S⁻¹) # convert to appropriate ArrayType
 
-  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, D, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -431,96 +438,47 @@ Compute the inverse Fourier transform of `varh` and store it in `var`.
 invtransform!(var, varh, params::AbstractParams) = ldiv!(var, params.rfftplan, varh)
 
 """
-    pv_streamfunction_kernel!(y, M, x, ::Val{N}) where N
+    calcD!(D, H₀, nlevels)
 
-Kernel for the PV to streamfunction conversion steps. The kernel performs the
-matrix multiplication
-
-```math
-y = M x
-```
-
-for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels`.
-This can be used to perform `qh = params.S * ψh` or `ψh = params.S⁻¹ qh`.
-
-StaticVectors are used to efficiently perform the matrix-vector multiplication.
+Construct the `nlevels` x `nlevels` Chebyshev differentiation matrix ``D``, which discretizes ``∂z``
 """
-@kernel function pv_streamfunction_kernel!(y, M, x, ::Val{N}) where N
-  i, j = @index(Global, NTuple)
+function calcD!(D, H₀, nlevels)
+    # Chebyshev nodes
+    ξ = [cos((i - 1) * pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
+    z = H₀ / 2 .* (ξ .- 1)                                       # maps [-1, 1] -> [-H₀, 0]
+    
+    # Chebyshev differentiation matrix D
+    c = ones(nlevels)
+    c[1] = 2
+    c[nlevels] = 2
+    for i in 1 : nlevels, j in 1 : nlevels
+        if i ≠ j
+            @views D[i, j] = (c[i] / c[j]) * (-1)^(i + j) / (ξ[i] - ξ[j])
+        end
+    end
+    # Diagonal entries to ensure that rows sum to zero (-> constant vectors in null space)
+    for i in 1 : nlevels
+        @views D[i, i] = -sum(D[i, j] for j in 1 : nlevels if j ≠ i)
+    end
+    
+    # Scale to [-H₀, 0] grid
+    D = 2 / H₀ * D
 
-  x_tuple = ntuple(Val(N)) do n
-    @inbounds x[i, j, n]
-  end
-
-  T = eltype(x)
-  x_sv = SVector{N, T}(x_tuple)
-  y_sv = @inbounds M[i, j] * x_sv
-
-  ntuple(Val(N)) do n
-    @inbounds y[i, j, n] = y_sv[n]
-  end
+    return nothing
 end
 
 """
-    pvfromstreamfunction!(qh, ψh, params, grid)
+    calcF!(F, D, f₀, N²)
 
-Obtain the Fourier transform of the PV from the streamfunction `ψh` at each level using
-`qh = params.S * ψh`.
-
-The matrix multiplications are done via launching a kernel. We use a work layout over
-which the kernel is launched.
+Construct the `nlevels` x `nlevels` array ``F`` that discretizes the vertical component of the PV inversion.
 """
-function pvfromstreamfunction!(qh, ψh, params, grid)
-  # Larger workgroups are generally more efficient. For more generality, we could put an
-  # if statement that incurs different behavior when either nkl or nl are less than 8.
-  workgroup = 8, 8
-
-  # The worksize determines how many times the kernel is run
-  worksize = grid.nkr, grid.nl
-
-  # Instantiates the kernel for relevant backend device
-  backend = KernelAbstractions.get_backend(qh)
-  kernel! = pv_streamfunction_kernel!(backend, workgroup, worksize)
-
-  # Launch the kernel
-  S, nlevels = params.S, params.nlevels
-  kernel!(qh, S, ψh, Val(nlevels))
-
-  # Ensure that no other operations occur until the kernel has finished
-  KernelAbstractions.synchronize(backend)
-
-  return nothing
-end
-
-"""
-    streamfunctionfrompv!(ψh, qh, params, grid)
-
-Invert the PV to obtain the Fourier transform of the streamfunction `ψh` at each level from
-`qh` using `ψh = params.S⁻¹ * qh`.
-
-The matrix multiplications are done via launching a kernel. We use a work layout over
-which the kernel is launched.
-"""
-function streamfunctionfrompv!(ψh, qh, params, grid)
-  # Larger workgroups are generally more efficient. For more generality, we could put an
-  # if statement that incurs different behavior when either nkl or nl are less than 8.
-  workgroup = 8, 8
-
-  # The worksize determines how many times the kernel is run
-  worksize = grid.nkr, grid.nl
-
-  # Instantiates the kernel for relevant backend device
-  backend = KernelAbstractions.get_backend(ψh)
-  kernel! = pv_streamfunction_kernel!(backend, workgroup, worksize)
-
-  # Launch the kernel
-  S⁻¹, nlevels = params.S⁻¹, params.nlevels
-  kernel!(ψh, S⁻¹, qh, Val(nlevels))
-
-  # Ensure that no other operations occur until the kernel has finished
-  KernelAbstractions.synchronize(backend)
-
-  return nothing
+function calcF!(F, D, f₀, N²)
+    
+    @views F[1, :] = f₀ * D[1, :]
+    @views F[end, :] = f₀ * D[end, :]
+    @views F[2 : end - 1, :] = (D .* (f₀^2 ./ N²)' * D)[2 : end - 1, :]
+    
+    return nothing
 end
 
 """
@@ -561,41 +519,96 @@ function calcS⁻¹!(S⁻¹, F, nlevels, grid)
 end
 
 """
-    calcF!(F, f₀, H₀, N², nlevels)
+    inversion_kernel!(y, M, x, ::Val{N}) where N
 
-Construct the `nlevels` x `nlevels` array ``F`` that discretizes the vertical component of the PV inversion.
+Kernel for matrix-vector multiplication at given wavenumber. The kernel performs the matrix multiplication
+
+```math
+y = M x
+```
+
+for every wavenumber, where ``y`` and ``x`` are column-vectors of length `nlevels`.
+This can be used to perform the PV inversion, e.g., `qh = params.S * ψh` or `ψh = params.S⁻¹ qh`.
+It is also used to find the vertical velocity via the omega equation, e.g., `wh = params.M⁻¹ rhsh`.
+
+StaticVectors are used to efficiently perform the matrix-vector multiplication.
+"""
+@kernel function inversion_kernel!(y, M, x, ::Val{N}) where N
+  i, j = @index(Global, NTuple)
+
+  x_tuple = ntuple(Val(N)) do n
+    @inbounds x[i, j, n]
+  end
+
+  T = eltype(x)
+  x_sv = SVector{N, T}(x_tuple)
+  y_sv = @inbounds M[i, j] * x_sv
+
+  ntuple(Val(N)) do n
+    @inbounds y[i, j, n] = y_sv[n]
+  end
+end
 
 """
+    pvfromstreamfunction!(qh, ψh, params, grid)
 
-function calcF!(F, f₀, H₀, N², nlevels)
-    # Chebyshev nodes
-    ξ = [cos((i - 1)* pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
-    z = H₀ / 2 .* (ξ .- 1)                                      # maps [-1, 1] -> [-H₀, 0]
-    
-    # Chebyshev differentiation matrix D
-    c = ones(nlevels)
-    c[1] = 2
-    c[nlevels] = 2
-    D = zeros(nlevels, nlevels)
-    for i in 1 : nlevels, j in 1 : nlevels
-        if i ≠ j
-            D[i, j] = (c[i] / c[j]) * (-1)^(i + j) / (ξ[i] - ξ[j])
-        end
-    end
-    # Diagonal entries to ensure that rows sum to zero (-> constant vectors in null space)
-    for i in 1 : nlevels
-        D[i, i] = -sum(D[i, j] for j in 1 : nlevels if j ≠ i)
-    end
-    
-    # Scale to [-H₀, 0] grid
-    D = 2 / H₀ * D
-    
-    # Build F
-    @views F[1, :] = f₀ * D[1, :]
-    @views F[nlevels, :] = f₀ * D[nlevels, :]
-    @views F[2 : nlevels - 1, :] = (D .* (f₀^2 ./ N²)' * D)[2 : nlevels - 1, :]
-    
-    return nothing
+Obtain the Fourier transform of the PV from the streamfunction `ψh` at each level using
+`qh = params.S * ψh`.
+
+The matrix multiplications are done via launching a kernel. We use a work layout over
+which the kernel is launched.
+"""
+function pvfromstreamfunction!(qh, ψh, params, grid)
+  # Larger workgroups are generally more efficient. For more generality, we could put an
+  # if statement that incurs different behavior when either nkl or nl are less than 8.
+  workgroup = 8, 8
+
+  # The worksize determines how many times the kernel is run
+  worksize = grid.nkr, grid.nl
+
+  # Instantiates the kernel for relevant backend device
+  backend = KernelAbstractions.get_backend(qh)
+  kernel! = inversion_kernel!(backend, workgroup, worksize)
+
+  # Launch the kernel
+  S, nlevels = params.S, params.nlevels
+  kernel!(qh, S, ψh, Val(nlevels))
+
+  # Ensure that no other operations occur until the kernel has finished
+  KernelAbstractions.synchronize(backend)
+
+  return nothing
+end
+
+"""
+    streamfunctionfrompv!(ψh, qh, params, grid)
+
+Invert the PV to obtain the Fourier transform of the streamfunction `ψh` at each level from
+`qh` using `ψh = params.S⁻¹ * qh`.
+
+The matrix multiplications are done via launching a kernel. We use a work layout over
+which the kernel is launched.
+"""
+function streamfunctionfrompv!(ψh, qh, params, grid)
+  # Larger workgroups are generally more efficient. For more generality, we could put an
+  # if statement that incurs different behavior when either nkl or nl are less than 8.
+  workgroup = 8, 8
+
+  # The worksize determines how many times the kernel is run
+  worksize = grid.nkr, grid.nl
+
+  # Instantiates the kernel for relevant backend device
+  backend = KernelAbstractions.get_backend(ψh)
+  kernel! = inversion_kernel!(backend, workgroup, worksize)
+
+  # Launch the kernel
+  S⁻¹, nlevels = params.S⁻¹, params.nlevels
+  kernel!(ψh, S⁻¹, qh, Val(nlevels))
+
+  # Ensure that no other operations occur until the kernel has finished
+  KernelAbstractions.synchronize(backend)
+
+  return nothing
 end
 
 # -------
