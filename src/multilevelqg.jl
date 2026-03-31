@@ -132,13 +132,13 @@ function Problem(nlevels::Int,                                     # number of l
 end
 
 """
-    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
+    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Atrans2D, Trfft} <: AbstractParams
 
 The parameters for the `MultiLevelQG` problem.
 
 $(TYPEDFIELDS)
 """
-struct Params{T, Aphys3D, Aphys2D_CPU, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
+struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Atrans2D, Trfft} <: AbstractParams
   # prescribed params
     "number of levels"
    nlevels :: Int
@@ -153,7 +153,7 @@ struct Params{T, Aphys3D, Aphys2D_CPU, Atrans4D, Atrans4D_int, Trfft} <: Abstrac
     "array with background constant zonal flow ``U(y)`` at Chebyshev levels"
          U :: Aphys3D
     "array containing the bathymetry"
-       eta :: Aphys2D_CPU
+       eta :: Aphys2D
     "tuple containing the ``(x, y)`` components of topographic large-scale gradient"
     topographic_gradient :: Tuple{T, T}
     "linear bottom drag coefficient"
@@ -179,7 +179,7 @@ struct Params{T, Aphys3D, Aphys2D_CPU, Atrans4D, Atrans4D_int, Trfft} <: Abstrac
     "array containing coefficients for inverting the interior omega equation for vertical velocity"
        M⁻¹ :: Atrans4D_int
     "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
-         D :: Aphys2D
+         D :: Atrans2D
     "rfft plan for FFTs"
   rfftplan :: Trfft
 end
