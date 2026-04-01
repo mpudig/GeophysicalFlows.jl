@@ -6,7 +6,7 @@ export
   streamfunctionfrompv!,
   pvfromstreamfunction!,
   bfromstreamfunction!,
-  wfromstreamfunction!,
+  omegaeqn!,
   updatevars!,
 
   set_q!,
@@ -655,7 +655,7 @@ function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Mkl = -k² * diagm(N²_int) + (f₀ * D²_int)
+    Mkl = -k² * diagm(N²_int) + (f₀^2 * D²_int)
     M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(Mkl)
   end
 
@@ -666,7 +666,7 @@ function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 end
 
 """
-    wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
+    omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
 
 Obtain the Fourier transform of the vertical velocity `wh` at each level from the omega equation given
   - the Fourier transform of the upper boundary condition at `z = 0`,
@@ -677,7 +677,7 @@ by doing `wh = params.M⁻¹ * rhsh` in the interior, `wh = wtoph` at `z = 0`, a
 The matrix multiplications are done via launching a kernel. We use a work layout over
 which the kernel is launched.
 """
-function wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
+function omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
   # Larger workgroups are generally more efficient. For more generality, we could put an
   # if statement that incurs different behavior when either nkl or nl are less than 8.
   workgroup = 8, 8
@@ -704,13 +704,13 @@ function wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
 end
 
 """
-    wfromstreamfunction!(wh, prob)
+    omegaeqn!(wh, prob)
 
 Obtain the Fourier transform of the vertical velocity `wh` at each level from the full omega equation
 (interior forcing and non-zero boundary conditions) by computing terms from variables stored in prob.
 
 """
-function wfromstreamfunction!(wh, prob) 
+function omegaeqn!(wh, prob) 
   sol, vars, params, grid = prob.sol, prob.vars, prob.params, prob.grid
   A = device_array(grid.device)
   nkr = grid.nkr
@@ -743,7 +743,7 @@ function wfromstreamfunction!(wh, prob)
   # Lower BC: w = rζ + J(ψ, h) at z = -H
   wboth = similar(vars.qh, nkr, nl)
 
-  @views wboth .= -params.r * ζh[:, :, end]
+  @views wboth  .= params.r * ζh[:, :, end]
   @views wboth .+= im * grid.kr .* rfft(vars.u[:, :, end] .* params.eta) .+
                    im * grid.l  .* rfft(vars.v[:, :, end] .* params.eta)
 
@@ -774,9 +774,9 @@ function wfromstreamfunction!(wh, prob)
   vbh = vars.vh  # use vars.vh as scratch varaible
   fwdtransform!(vbh, Fy, params)
 
-  @views @. rhsh .+= grid.Krsq * (im * grid.kr * ubh + im * grid.l * vbh)[:, :, 2 : end - 1]
+  @views @. rhsh .+= grid.Krsq * (im * grid.kr * ubh[:, :, 2 : end - 1] + im * grid.l * vbh[:, :, 2 : end - 1])
 
-  return wfromstreamfunction!(wh, wtoph, wboth, rhsh, params, grid)
+  return omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
 end
 
 # -------
