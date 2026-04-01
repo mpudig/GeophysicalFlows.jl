@@ -132,13 +132,13 @@ function Problem(nlevels::Int,                                     # number of l
 end
 
 """
-    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Atrans2D, Trfft} <: AbstractParams
+    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
 
 The parameters for the `MultiLevelQG` problem.
 
 $(TYPEDFIELDS)
 """
-struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Atrans2D, Trfft} <: AbstractParams
+struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
   # prescribed params
     "number of levels"
    nlevels :: Int
@@ -179,7 +179,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Atrans2D, Trfft} <: A
     "array containing coefficients for inverting the interior omega equation for vertical velocity"
        M⁻¹ :: Atrans4D_int
     "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
-         D :: Atrans2D
+         D :: Aphys2D
     "rfft plan for FFTs"
   rfftplan :: Trfft
 end
@@ -238,7 +238,8 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   Uyy = CUDA.@allowscalar repeat(Uyy, outer=(nx, 1, 1))
 
   # Calculate the periodic components of the bathymetry gradients
-  etah = rfft(A(eta))
+  eta = A(eta)
+  etah = rfft(eta)
   etax = irfft(im * kr .* etah, nx)   # ∂η/∂x
   etay = irfft(im * l  .* etah, nx)   # ∂η/∂y
 
