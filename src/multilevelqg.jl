@@ -475,7 +475,7 @@ function calcD!(D, H₀, nlevels)
     end
     
     # Scale to [-H₀, 0] grid
-    D = 2 / H₀ * D
+    D .= 2 / H₀ * D
 
     return nothing
 end
@@ -656,7 +656,7 @@ function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
     Mkl = -k² * diagm(N²_int) + (f₀^2 * D²_int)
-    M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(Mkl)
+    M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(I / Mkl)
   end
 
   T = eltype(grid)
@@ -691,7 +691,7 @@ function omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
 
   # Launch the kernel
   M⁻¹, nlevels = params.M⁻¹, params.nlevels
-  kernel!(wh[:, :, 2 : end - 1], M⁻¹, rhsh, Val(nlevels - 2))
+  kernel!(view(wh, :, :, 2 : nlevels - 1), M⁻¹, rhsh, Val(nlevels - 2))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
