@@ -652,7 +652,7 @@ where ``f̂'' represents the rhs interior forcing + boundary conditions in the o
 function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
   T = eltype(grid)
 
-  D²_int = (D * D)[2 : end - 1, 2 : end - 1]
+  D²_int = (D * D)[2 : end - 1, :]
   N²_int = N²[2 : end - 1]
 
   Mkl = zeros(T, (nlevels, nlevels))
@@ -661,7 +661,7 @@ function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Mkl[2 : end - 1, 2 : end - 1] .= -k² * diagm(N²_int) + (f₀^2 * D²_int)
+    Mkl[2 : end - 1, 2 : end - 1] .= -k² * diagm([0; N²_int; 0]) + (f₀^2 * D²_int)
     M⁻¹[m, n] = SMatrix{nlevels, nlevels}(I / Mkl)
   end
 
