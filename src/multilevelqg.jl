@@ -132,13 +132,13 @@ function Problem(nlevels::Int,                                     # number of l
 end
 
 """
-    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
+    struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
 
 The parameters for the `MultiLevelQG` problem.
 
 $(TYPEDFIELDS)
 """
-struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractParams
+struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   # prescribed params
     "number of levels"
    nlevels :: Int
@@ -176,8 +176,8 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Atrans4D_int, Trfft} <: AbstractPar
          S :: Atrans4D
     "array containing coefficients for inverting PV to streamfunction"
        S⁻¹ :: Atrans4D
-    "array containing coefficients for inverting the interior omega equation for vertical velocity"
-       M⁻¹ :: Atrans4D_int
+    "array containing coefficients for inverting the omega equation for vertical velocity"
+       M⁻¹ :: Atrans4D
     "array containing Chebyshev differentiation matrix, which discretizes ``∂z``"
          D :: Aphys2D
     "rfft plan for FFTs"
