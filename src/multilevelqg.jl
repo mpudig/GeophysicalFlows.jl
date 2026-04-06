@@ -662,7 +662,12 @@ function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
     Mkl[2 : end - 1, :] .= -k² * N²_int + (f₀^2 * D²_int)
-    M⁻¹[m, n] = SMatrix{nlevels, nlevels}(I / Mkl)
+    Minv = I / Mkl
+    CUDA.@allowscalar Minv[1, :] .= 0
+    CUDA.@allowscalar Minv[1, 1] = 1
+    CUDA.@allowscalar Minv[end, :] .= 0
+    CUDA.@allowscalar Minv[end, end] = 1
+    M⁻¹[m, n] = SMatrix{nlevels, nlevels}(Minv)
   end
 
   M⁻¹[1, 1] = SMatrix{nlevels, nlevels}(zeros(T, (nlevels, nlevels)))
