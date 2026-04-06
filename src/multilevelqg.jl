@@ -645,39 +645,47 @@ end
 """
     calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
 
-Construct the array ``M⁻¹``, which consists of `nlevels - 2` x `nlevels - 2` static arrays ``(M_𝐤)⁻¹``
+Construct the array ``M⁻¹``, which consists of `nlevels` x `nlevels` static arrays ``(M_𝐤)⁻¹``
 that relate the ``ŵ_j``'s and ``f̂_j``'s for every wavenumber: ``ŵ_𝐤 = (M_𝐤)⁻¹ f̂_𝐤``,
-where ``f̂'' represents the forcing in the interior part of the omega equation. 
+where ``f̂'' represents the rhs interior forcing + boundary conditions in the omega equation. 
 """
 function calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
+  T = eltype(grid)
+
   D²_int = (D * D)[2 : end - 1, 2 : end - 1]
   N²_int = N²[2 : end - 1]
 
+  Mkl = zeros(T, (nlevels, nlevels))
+  CUDA.@allowscalar Mkl[1, :] = [1; zeros(T, nlevels - 1)]
+  CUDA.@allowscalar Mkl[end, :] = [zeros(T, nlevels - 1); 1]
+
   for n=1:grid.nl, m=1:grid.nkr
     k² = CUDA.@allowscalar grid.Krsq[m, n] == 0 ? 1 : grid.Krsq[m, n]
-    Mkl = -k² * diagm(N²_int) + (f₀^2 * D²_int)
-    M⁻¹[m, n] = SMatrix{nlevels - 2, nlevels - 2}(I / Mkl)
+    Mkl[2 : end - 1, 2 : end - 1] = -k² * diagm(N²_int) + (f₀^2 * D²_int)
+    M⁻¹[m, n] = SMatrix{nlevels, nlevels}(I / Mkl)
   end
 
-  T = eltype(grid)
-  M⁻¹[1, 1] = SMatrix{nlevels - 2, nlevels - 2}(zeros(T, (nlevels - 2, nlevels - 2)))
+  M⁻¹[1, 1] = SMatrix{nlevels, nlevels}(zeros(T, (nlevels, nlevels)))
 
   return nothing
 end
 
 """
-    omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
+    omegaeqn!(wh, rhsh, params, grid)
 
 Obtain the Fourier transform of the vertical velocity `wh` at each level from the omega equation given
   - the Fourier transform of the upper boundary condition at `z = 0`,
-  - the Fourier transform of the bottom boundary condition at `z = -H`, and
-  - the Fourier transform of the forcing in the interior `–H < z < 0`
-by doing `wh = params.M⁻¹ * rhsh` in the interior, `wh = wtoph` at `z = 0`, and `wh = wboth` at `z = -H`.
+  - the Fourier transform of the forcing in the interior `–H < z < 0`, and
+  - the Fourier transform of the bottom boundary condition at `z = -H`
+by doing `wh = params.M⁻¹ * rhsh`, where rhsh has
+  - the Fourier transform of the upper boundary condition at `z = 0` in the first vertical level
+  - the Fourier transform of the interior forcing in the second-penultimate vertical levels
+  - the Fourier transform of the bottom boundary condition at `z = -H` in the last vertical level
 
 The matrix multiplications are done via launching a kernel. We use a work layout over
 which the kernel is launched.
 """
-function omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
+function omegaeqn!(wh, rhsh, params, grid)
   # Larger workgroups are generally more efficient. For more generality, we could put an
   # if statement that incurs different behavior when either nkl or nl are less than 8.
   workgroup = 8, 8
@@ -691,14 +699,10 @@ function omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
 
   # Launch the kernel
   M⁻¹, nlevels = params.M⁻¹, params.nlevels
-  kernel!(view(wh, :, :, 2 : nlevels - 1), M⁻¹, rhsh, Val(nlevels - 2))
+  kernel!(view(wh, :, :, :), M⁻¹, rhsh, Val(nlevels))
 
   # Ensure that no other operations occur until the kernel has finished
   KernelAbstractions.synchronize(backend)
-
-  # Prescribe upper and lower boundary conditions
-  @views wh[:, :, 1] = wtoph
-  @views wh[:, :, end] = wboth
 
   return nothing
 end
@@ -737,19 +741,18 @@ function omegaeqn!(wh, prob)
   ζ = vars.ψ      # use vars.ψ as scratch variable
   invtransform!(ζ, ζh, params)
 
-  # Upper BC: w = 0 at z = 0
-  wtoph = A(zeros(eltype(vars.qh), nkr, nl))
+  ### RHS
+  rhsh = similar(vars.qh, nkr, nl, nlevels)
 
-  # Lower BC: w = rζ + J(ψ, h) at z = -H
-  wboth = similar(vars.qh, nkr, nl)
+  ## Upper BC: w = 0 at z = 0
+  @views rhsh[:, :, 1] .= A(zeros(eltype(vars.qh), nkr, nl))
 
-  @views wboth  .= params.r * ζh[:, :, end]
-  @views wboth .+= im * grid.kr .* rfft(vars.u[:, :, end] .* params.eta) .+
-                   im * grid.l  .* rfft(vars.v[:, :, end] .* params.eta)
+  ## Lower BC: w = rζ + J(ψ, h) at z = -H
+  @views rhsh[:, :, end]  .= params.r * ζh[:, :, end]
+  @views rhsh[:, :, end] .+= im * grid.kr .* rfft(vars.u[:, :, end] .* params.eta) .+
+                             im * grid.l  .* rfft(vars.v[:, :, end] .* params.eta)
 
   ## Interior RHS forcing for -H < z < 0
-  rhsh = similar(vars.qh, nkr, nl, nlevels - 2)
-
   # Scratch variables
   Fx = similar(vars.u)
   Fy = similar(vars.v)
@@ -763,7 +766,7 @@ function omegaeqn!(wh, prob)
   vζh = vars.vh  # use vars.vh as scratch varaible
   fwdtransform!(vζh, Fy, params)
 
-  @views rhsh .= params.f₀ * permutedims(reshape(params.D * reshape(permutedims(im * grid.kr .* uζh .+ im * grid.l .* vζh, (3, 1, 2)), nlevels, nkr * nl), nlevels, nkr, nl), (2, 3, 1))[:, :, 2 : end - 1]
+  @views rhsh[:, :, 2 : end - 1] .= params.f₀ * permutedims(reshape(params.D * reshape(permutedims(im * grid.kr .* uζh .+ im * grid.l .* vζh, (3, 1, 2)), nlevels, nkr * nl), nlevels, nkr, nl), (2, 3, 1))[:, :, 2 : end - 1]
 
   # Buoyancy part
   @. Fx = vars.u * b
@@ -774,9 +777,9 @@ function omegaeqn!(wh, prob)
   vbh = vars.vh  # use vars.vh as scratch varaible
   fwdtransform!(vbh, Fy, params)
 
-  @views @. rhsh .+= grid.Krsq * (im * grid.kr * ubh[:, :, 2 : end - 1] + im * grid.l * vbh[:, :, 2 : end - 1])
+  @views @. rhsh[:, :, 2 : end - 1] .+= grid.Krsq * (im * grid.kr * ubh[:, :, 2 : end - 1] + im * grid.l * vbh[:, :, 2 : end - 1])
 
-  return omegaeqn!(wh, wtoph, wboth, rhsh, params, grid)
+  return omegaeqn!(wh, rhsh, params, grid)
 end
 
 # -------
