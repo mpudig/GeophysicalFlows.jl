@@ -280,7 +280,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   calcS⁻¹!(S⁻¹, F, nlevels, grid)
 
   # Compute omega equation inversion matrix
-  typeofMkl = SArray{Tuple{nlevels - 2, nlevels - 2}, T, 2, (nlevels - 2)^2} # StaticArrays of type T and dims = (nlevels - 2, nlevels - 2)
+  typeofMkl = SArray{Tuple{nlevels, nlevels}, T, 2, nlevels^2} # StaticArrays of type T and dims = (nlevels, nlevels)
 
   M⁻¹ = Array{typeofMkl, 2}(undef, (nkr, nl))    # Array of StaticArrays
   calcM⁻¹!(M⁻¹, D, f₀, N², nlevels, grid)
