@@ -44,7 +44,8 @@ nothingfunction(args...) = nothing
                           N² = pi .* ones(nlevels),
                         eta = nothing,
        topographic_gradient = (0, 0),
-                          r = 0,
+                          r = 0.0,
+                         cd = 0.0,
                           ν = 0,
                          nν = 1,
                          dt = 0.01,
@@ -78,6 +79,7 @@ Keyword arguments
   - `eta`: Periodic component of the bathymetry.
   - `topographic_gradient`: The ``(x, y)`` components of the topographic large-scale gradient.
   - `r`: Linear bottom drag coefficient.
+  - `cd`: Quadratic bottom drag coefficient.
   - `ν`: Small-scale (hyper)-viscosity coefficient.
   - `nν`: (Hyper)-viscosity order, `nν```≥ 1``.
   - `dt`: Time-step.
@@ -104,7 +106,8 @@ function Problem(nlevels::Int,                                     # number of l
                           eta = nothing,                           # periodic component of the bathymetry
          topographic_gradient = (0, 0),                            # tuple with the ``(x, y)`` components of topographic large-scale gradient
               # Bottom Drag and/or (hyper)-viscosity
-                            r = 0,
+                            r = 0.0,
+                           cd = 0.0,
                             ν = 0,
                            nν = 1,
               # Timestepper and equation options
@@ -122,7 +125,7 @@ function Problem(nlevels::Int,                                     # number of l
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlevels, f₀, β, H₀, N², U, eta, topographic_gradient, r, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, H₀, N², U, eta, topographic_gradient, r, cd, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -158,6 +161,8 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
     topographic_gradient :: Tuple{T, T}
     "linear bottom drag coefficient"
          r :: T
+    "quadratic bottom drag coefficient"
+        cd :: T
     "small-scale (hyper)-viscosity coefficient"
          ν :: T
     "(hyper)-viscosity order, `nν```≥ 1``"
@@ -218,7 +223,7 @@ function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   return A(U_3D)
 end
 
-function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient, r, ν, nν, grid::TwoDGrid;
+function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient, r, cd, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
@@ -290,7 +295,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   M⁻¹ = A(M⁻¹)
   D = A(D)
 
-  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, M⁻¹, D, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(cd), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, M⁻¹, D, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -798,18 +803,15 @@ Compute the nonlinear term, that is the advection term, the bottom drag, and the
 
 ```math
 N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j}
- + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} N² r |𝐤|^2 ψ̂_n + F̂_j .
+ + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} D̂_j + F̂_j .
 ```
 """
 function calcN!(N, sol, t, clock, vars, params, grid)
-  nlevels = numberoflevels(params)
 
   dealias!(sol, grid)
 
   calcN_advection!(N, sol, vars, params, grid)
-
-  @views @. N[:, :, end] += params.N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
-
+  calcN_drag!(N, vars, params, grid)
   addforcing!(N, sol, t, clock, vars, params, grid)
 
   return nothing
@@ -822,14 +824,13 @@ Compute the nonlinear term of the linearized equations:
 
 ```math
 N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} + \\widehat{(∂_y ψ_j)(∂_x Q_j)}
-- \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} N² r |𝐤|^2 ψ̂_n + F̂_j .
+- \\widehat{(∂_x ψ_j)(∂_y Q_j)} + + F̂_j + δ_{j, n} D̂_j .
 ```
 """
 function calcNlinear!(N, sol, t, clock, vars, params, grid)
-  nlevels = numberoflevels(params)
 
   calcN_linearadvection!(N, sol, vars, params, grid)
-  @views @. N[:, :, end] += params.N²[end] * params.r * grid.Krsq * vars.ψh[:, :, end]   # bottom linear drag
+  calcN_lineardrag!(N, vars, params, grid)
   addforcing!(N, sol, t, clock, vars, params, grid)
 
   return nothing
@@ -883,7 +884,6 @@ function calcN_advection!(N, sol, vars, params, grid)
   return nothing
 end
 
-
 """
     calcN_linearadvection!(N, sol, vars, params, grid)
 
@@ -931,6 +931,52 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
   return nothing
 end
 
+"""
+    calcN_drag!(N, vars, params, grid)
+
+Compute the drag term and store it in `N`:
+
+```math
+D̂_j = - .
+```
+"""
+function calcN_drag!(N, vars, params, grid)
+
+  if params.r != 0.0   # bottom linear drag
+    @views @. N[:, :, end] += params.r * params.N²[end] * grid.Krsq * vars.ψh[:, :, end]
+  end
+
+  if params.cd != 0.0  # bottom quadratic drag
+
+    u = irfft(-im * grid.l  .* vars.ψh[:, :, end], grid.nx)
+    v = irfft( im * grid.kr .* vars.ψh[:, :, end], grid.nx)
+
+    Xₛh = rfft(sqrt(u.^2 .+ v.^2) .* u)
+    Yₛh = rfft(sqrt(u.^2 .+ v.^2) .* v)
+
+    @views @. N[:, :, end] += params.cd * params.N²[end] / params.f₀ * (im * grid.kr * Yₛh - im * grid.l * Xₛh)
+  end
+
+  return nothing
+end
+
+"""
+    calcN_lineardrag!(N, vars, params, grid)
+
+Compute the drag term of the linearized equations and store it in `N`:
+
+```math
+D̂_j = - .
+```
+"""
+function calcN_lineardrag!(N, vars, params, grid)
+
+  if params.r != 0.0   # bottom linear drag
+    @views @. N[:, :, end] += params.r * params.N²[end] * grid.Krsq * vars.ψh[:, :, end]
+  end
+
+  return nothing
+end
 
 """
     addforcing!(N, sol, t, clock, vars, params, grid)
