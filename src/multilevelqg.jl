@@ -951,8 +951,8 @@ function calcN_drag!(N, vars, params, grid)
     u = irfft(-im * grid.l  .* vars.ψh[:, :, end], grid.nx)
     v = irfft( im * grid.kr .* vars.ψh[:, :, end], grid.nx)
 
-    Xₛh = rfft(sqrt(u.^2 .+ v.^2) .* u)
-    Yₛh = rfft(sqrt(u.^2 .+ v.^2) .* v)
+    Xₛh = rfft(sqrt.(u.^2 .+ v.^2) .* u)
+    Yₛh = rfft(sqrt.(u.^2 .+ v.^2) .* v)
 
     @views @. N[:, :, end] += params.cd * params.N²[end] / params.f₀ * (im * grid.kr * Yₛh - im * grid.l * Xₛh)
   end
