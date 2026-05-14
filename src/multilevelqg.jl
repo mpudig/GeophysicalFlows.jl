@@ -5,12 +5,12 @@ export
   invtransform!,
   streamfunctionfrompv!,
   pvfromstreamfunction!,
-  bfromstreamfunction!,
-  omegaeqn!,
   updatevars!,
 
   set_q!,
   set_ψ!,
+  bfromstreamfunction!,
+  omegaeqn!,
   energies,
   fluxes
 
@@ -463,9 +463,9 @@ Construct the `nlevels` x `nlevels` Chebyshev differentiation matrix ``D``, whic
 function calcD!(D, H₀, nlevels)
     # Chebyshev nodes
     ξ = [cos((i - 1) * pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
-    z = H₀ / 2 .* (ξ .- 1)                                       # maps [-1, 1] -> [-H₀, 0]
+    z = H₀ / 2 .* (ξ .- 1)                                       # maps to [-H₀, 0]
     
-    # Chebyshev differentiation matrix D
+    # Chebyshev diff matrix
     c = ones(nlevels)
     c[1] = 2
     c[nlevels] = 2
@@ -474,7 +474,7 @@ function calcD!(D, H₀, nlevels)
             @views D[i, j] = (c[i] / c[j]) * (-1)^(i + j) / (ξ[i] - ξ[j])
         end
     end
-    # Diagonal entries to ensure that rows sum to zero (-> constant vectors in null space)
+    # Diagonal entries to ensure rows sum to zero
     for i in 1 : nlevels
         @views D[i, i] = -sum(D[i, j] for j in 1 : nlevels if j ≠ i)
     end
