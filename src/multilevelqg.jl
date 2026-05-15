@@ -1032,31 +1032,31 @@ function omegaeqn!(wh, prob)
   Q2 = similar(vars.q)
   Qh = similar(vars.qh)
 
-  # Zonal part of Qx
+  # Zonal part of Q1
   invtransform!(Q1, im * grid.kr .* vars.uh, params)          # ∂xu
   invtransform!(Q2, im * grid.kr .* bh, params)               # ∂xb
   fwdtransform!(Qh, Q1 .* Q2, params)                         # \hat(∂xu ∂xb)
   @views rhsh[:, :, 2 : end - 1] .= -2 * im * grid.kr .* Qh[:, :, 2 : end - 1]
 
-  # Zonal part of Qy
+  # Zonal part of Q2
   invtransform!(Q1, im * grid.l .* vars.uh, params)           # ∂yu
   fwdtransform!(Qh, Q1 .* Q2, params)                         # \hat(∂yu ∂xb)
   @views rhsh[:, :, 2 : end - 1] .+= -2 * im * grid.l .* Qh[:, :, 2 : end - 1]
 
-  # Meridional part of Qx
+  # Meridional part of Q1
   invtransform!(Q1, im * grid.kr .* vars.vh, params)          # ∂xv
   invtransform!(Q2, im * grid.l  .* bh, params)               # ∂yb
   fwdtransform!(Qh, Q1 .* Q2, params)                         # \hat(∂xv ∂yb)
   @views rhsh[:, :, 2 : end - 1] .+= -2 * im * grid.kr .* Qh[:, :, 2 : end - 1]
 
-  # Meridional part of Qy
+  # Meridional part of Q2
   invtransform!(Q1, im * grid.l .* vars.vh, params)           # ∂yv
   fwdtransform!(Qh, Q1 .* Q2, params)                         # \hat(∂yv ∂yb)
   @views rhsh[:, :, 2 : end - 1] .+= -2 * im * grid.l .* Qh[:, :, 2 : end - 1]
 
   # Mean flow part
   ∂zU = reshape(reshape(params.U, nl, nlevels) * params.D', 1, nl, nlevels)[:, :, 2 : end - 1]
-  @views rhsh[:, :, 2 : end - 1] .+= -2 * params.f₀ * ∂zU .* grid.Krsq .* vars.ψh[:, :, 2 : end - 1]
+  @views rhsh[:, :, 2 : end - 1] .+= -2 * params.f₀ * ∂zU .* grid.Krsq .* vars.vh[:, :, 2 : end - 1]
 
   return omegaeqn!(wh, rhsh, params, grid)
 end
