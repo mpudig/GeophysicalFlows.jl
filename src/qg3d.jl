@@ -687,8 +687,8 @@ end
 Compute the nonlinear term, that is the advection term, the bottom drag, and the forcing:
 
 ```math
-N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
- + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} D̂_j + F̂_j .
+N_j = \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
+      - i k \\widehat{(-∂_y ψ_j + U_j) q_j} - i l \\widehat{(∂_x ψ_j + V_j) q_j} + δ_{j, n} D̂_j + F̂_j .
 ```
 """
 function calcN!(N, sol, t, clock, vars, params, grid)
@@ -708,8 +708,8 @@ end
 Compute the nonlinear term of the linearized equations:
 
 ```math
-N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
-+ \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + + F̂_j + δ_{j, n} D̂_j .
+N_j = \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
+      - i k \\widehat{U_j q_j} - i l \\widehat{V_j q_j} + δ_{j, n} D̂_j + F̂_j .
 ```
 """
 function calcNlinear!(N, sol, t, clock, vars, params, grid)
@@ -727,8 +727,8 @@ end
 Compute the advection term and store it in `N`:
 
 ```math
-N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
- + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} .
+N_j = \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
+      - i k \\widehat{(-∂_y ψ_j + U_j) q_j} - i l \\widehat{(∂_x ψ_j + V_j) q_j} .
 ```
 """
 function calcN_advection!(N, sol, vars, params, grid)
@@ -739,30 +739,29 @@ function calcN_advection!(N, sol, vars, params, grid)
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
+  ## Eddy advection of mean gradients
   invtransform!(vars.u, vars.uh, params)
-  @. vars.u += params.U                    # add the imposed zonal flow U
-
   uQx, uQxh = vars.q, vars.uh              # use vars.q and vars.uh as scratch variables
-  @. uQx = vars.u * params.Qx              # (U+u)*∂Q/∂x
+  @. uQx = vars.u * params.Qx              # u*∂Q/∂x
   fwdtransform!(uQxh, uQx, params)
-  @. N = - uQxh                            # -\hat{(U+u)*∂Q/∂x}
+  @. N = - uQxh                            # -\hat{u*∂Q/∂x}
 
   invtransform!(vars.v, vars.vh, params)
-  @. vars.v += params.V                    # add the imposed meridional flow V
-
   vQy, vQyh = vars.q, vars.vh              # use vars.q and vars.vh as scratch variables
-  @. vQy = vars.v * params.Qy              # (V+v)*∂Q/∂y
+  @. vQy = vars.v * params.Qy              # v*∂Q/∂y
   fwdtransform!(vQyh, vQy, params)
-  @. N -= vQyh                             # -\hat{(V+v)*∂Q/∂y}
+  @. N -= vQyh                             # -\hat{v*∂Q/∂y}
 
+  ## Total advection of eddy gradients
+  @. vars.u += params.U                    # add the imposed zonal flow U
+  @. vars.v += params.V                    # add the imposed meridional flow V
   invtransform!(vars.q, vars.qh, params)
 
   uq, vq  = vars.u, vars.v                 # use vars.u and vars.v as scratch variables
   uqh, vqh = vars.uh, vars.vh              # use vars.uh and vars.vh as scratch variables
   @. uq *= vars.q                          # (U+u)*q
   @. vq *= vars.q                          # (V+v)*q
-
-  fwdtransform!(uqh, uq, params)
+  fwdtransform!(uqh, uq, params)           
   fwdtransform!(vqh, vq, params)
 
   @. N -= im * grid.kr * uqh + im * grid.l * vqh    # -\hat{∂[(U+u)q]/∂x} - \hat{∂[(V+v)q]/∂y}
@@ -776,9 +775,8 @@ end
 Compute the advection term of the linearized equations and store it in `N`:
 
 ```math
-N_j = + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
-      - \\widehat{U_j ∂_x Q_j} - \\widehat{V_j ∂_y Q_j}
-      - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y q_j} .
+N_j = \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
+      - i k \\widehat{U_j q_j} - i l \\widehat{V_j q_j} .
 ```
 """
 function calcN_linearadvection!(N, sol, vars, params, grid)
@@ -789,35 +787,32 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
+  ## Eddy advection of mean gradients
   invtransform!(vars.u, vars.uh, params)
-
-  @. vars.u += params.U                    # add the imposed zonal flow U
   uQx, uQxh = vars.q, vars.uh              # use vars.q and vars.uh as scratch variables
-  @. uQx = vars.u * params.Qx              # (U+u)*∂Q/∂x
+  @. uQx = vars.u * params.Qx              # u*∂Q/∂x
   fwdtransform!(uQxh, uQx, params)
-  @. N = - uQxh                            # -\hat{(U+u)*∂Q/∂x}
+  @. N = - uQxh                            # -\hat{u*∂Q/∂x}
 
   invtransform!(vars.v, vars.vh, params)
-
-  @. vars.v += params.V                    # add the imposed meridional flow V
   vQy, vQyh = vars.q, vars.vh              # use vars.q and vars.vh as scratch variables
-  @. vQy = vars.v * params.Qy              # (V+v)*∂Q/∂y
+  @. vQy = vars.v * params.Qy              # v*∂Q/∂y
   fwdtransform!(vQyh, vQy, params)
-  @. N -= vQyh                             # -\hat{(V+v)*∂Q/∂y}
+  @. N -= vQyh                             # -\hat{v*∂Q/∂y}
 
+  ## Mean advection of eddy gradients
+  @. vars.u = params.U                     # use vars.u as scratch variable
+  @. vars.v = params.V                     # use vars.v as scratch variable
   invtransform!(vars.q, vars.qh, params)
 
-  @. vars.u  = params.U
-  Uq, Uqh  = vars.u, vars.uh               # use vars.u and vars.uh as scratch variables
-  @. Uq *= vars.q                          # U*q
-  fwdtransform!(Uqh, Uq, params)
-  @. N -= im * grid.kr * Uqh               # -\hat{∂[U*q]/∂x}
+  uq, vq  = vars.u, vars.v                 # use vars.u and vars.v as scratch variables
+  uqh, vqh = vars.uh, vars.vh              # use vars.uh and vars.vh as scratch variables
+  @. uq *= vars.q                          # U*q
+  @. vq *= vars.q                          # V*q
+  fwdtransform!(uqh, uq, params)           
+  fwdtransform!(vqh, vq, params)
 
-  @. vars.v  = params.V
-  Vq, Vqh  = vars.v, vars.vh               # use vars.v and vars.vh as scratch variables
-  @. Vq *= vars.q                          # V*q
-  fwdtransform!(Vqh, Vq, params)
-  @. N -= im * grid.l * Vqh                # -\hat{∂[V*q]/∂y}
+  @. N -= im * grid.kr * uqh + im * grid.l * vqh    # -\hat{∂[Uq]/∂x} - \hat{∂[Vq]/∂y}
 
   return nothing
 end
