@@ -1,4 +1,4 @@
-module MultiLevelQG
+module QG3D
 
 export
   fwdtransform!,
@@ -41,6 +41,7 @@ nothingfunction(args...) = nothing
                           β = 0.0,
                           H₀ = 1.0,
                           U = zeros(nlevels),
+                          V = zeros(nlevels),
                           N² = pi .* ones(nlevels),
                         eta = nothing,
        topographic_gradient = (0, 0),
@@ -56,7 +57,7 @@ nothingfunction(args...) = nothing
            aliased_fraction = 1/3,
                           T = Float64)
 
-Construct a multi-level quasi-geostrophic problem with `nlevels` levels (including surface buoyancy levels) on device `dev`.
+Construct a 3D quasi-geostrophic problem with `nlevels` levels (including upper and lower surface buoyancy levels) on device `dev`.
 The vertical is discretized using the Chebyshev collocation method. The vertical grid is thus defined by the Chebyshev grid,
 which depends on H₀ and nlevels.
 
@@ -74,7 +75,8 @@ Keyword arguments
   - `f₀`: Constant planetary vorticity.
   - `β`:  Planetary vorticity ``y``-gradient.
   - `H₀`: Extent of the ``z''-domain.
-  - `U`:  Background constant zonal flow ``U(y)`` at Chebyshev levels.
+  - `U`:  Background zonal flow ``U(y, z)`` at Chebyshev levels.
+  - `V`:  Background meridional flow ``V(x, z)`` at Chebyshev levels.
   - `N²`: Background stratification at Chebyshev levels.
   - `eta`: Periodic component of the bathymetry.
   - `topographic_gradient`: The ``(x, y)`` components of the topographic large-scale gradient.
@@ -101,7 +103,8 @@ function Problem(nlevels::Int,                                     # number of l
                            f₀ = 1.0,                               # Coriolis parameter
                             β = 0.0,                               # y-gradient of Coriolis parameter
                            H₀ = 1.0,                               # extent of the ``z''-domain.
-                            U = zeros(nlevels),                    # background constant zonal flow ``U(y)`` at Chebyshev levels
+                            U = zeros(nlevels),                    # background zonal flow ``U(y, z)`` at Chebyshev levels
+                            V = zeros(nlevels),                    # background meridional flow ``V(x, z)`` at Chebyshev levels
                            N² = pi .* ones(nlevels),               # background stratification at Chebyshev levels
                           eta = nothing,                           # periodic component of the bathymetry
          topographic_gradient = (0, 0),                            # tuple with the ``(x, y)`` components of topographic large-scale gradient
@@ -125,7 +128,7 @@ function Problem(nlevels::Int,                                     # number of l
 
   grid = TwoDGrid(dev; nx, Lx, ny, Ly, aliased_fraction, T)
 
-  params = Params(nlevels, f₀, β, H₀, N², U, eta, topographic_gradient, r, cd, ν, nν, grid; calcFq)
+  params = Params(nlevels, f₀, β, H₀, N², U, V, eta, topographic_gradient, r, cd, ν, nν, grid; calcFq)
 
   vars = calcFq == nothingfunction ? DecayingVars(grid, params) : (stochastic ? StochasticForcedVars(grid, params) : ForcedVars(grid, params))
 
@@ -137,7 +140,7 @@ end
 """
     struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
 
-The parameters for the `MultiLevelQG` problem.
+The parameters for the `QG3D` problem.
 
 $(TYPEDFIELDS)
 """
@@ -153,8 +156,10 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
          H₀ :: T
     "tuple with background stratification at Chebyshev levels"
          N² :: Tuple
-    "array with background constant zonal flow ``U(y)`` at Chebyshev levels"
+    "array with background zonal flow ``U(y, z)`` at Chebyshev levels"
          U :: Aphys3D
+    "array with background meridional flow ``V(x, z)`` at Chebyshev levels"
+         V :: Aphys3D
     "array containing the bathymetry"
        eta :: Aphys2D
     "tuple containing the ``(x, y)`` components of topographic large-scale gradient"
@@ -173,7 +178,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   # derived params
       "tuple of Chebyshev levels"
          z :: Tuple
-    "array containing ``x``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to topography"
+    "array containing ``x``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to ``V`` and topography"
         Qx :: Aphys3D
     "array containing ``y``-gradient of upper surface buoyancy, interior PV, and lower surface buoyancy due to ``β``, ``U``, and topography"
         Qy :: Aphys3D
@@ -189,6 +194,7 @@ struct Params{T, Aphys3D, Aphys2D, Atrans4D, Trfft} <: AbstractParams
   rfftplan :: Trfft
 end
 
+# Convert U to 3D array
 function convert_U_to_U3D(dev, nlevels, grid, U::AbstractArray{TU, 1}) where TU
   T = eltype(grid)
 
@@ -223,7 +229,42 @@ function convert_U_to_U3D(dev, nlevels, grid, U::Number)
   return A(U_3D)
 end
 
-function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient, r, cd, ν, nν, grid::TwoDGrid;
+# Convert V to 3D array
+function convert_V_to_V3D(dev, nlevels, grid, V::AbstractArray{TV, 1}) where TV
+  T = eltype(grid)
+
+  if length(V) == nlevels
+    V_2D = zeros(dev, T, (1, nlevels))
+    V_2D[:] = V
+    V_2D = repeat(V_2D, outer=(grid.nx, 1))
+  else
+    V_2D = zeros(dev, T, (grid.nx, 1))
+    V_2D[:] = V
+  end
+
+  V_3D = zeros(dev, T, (grid.nx, 1, nlevels))
+  @views V_3D[:, 1, :] = V_2D
+
+  return V_3D
+end
+
+function convert_V_to_V3D(dev, nlevels, grid, V::AbstractArray{TV, 2}) where TV
+  T = eltype(grid)
+  V_3D = zeros(dev, T, (grid.nx, 1, nlevels))
+  @views V_3D[:, 1, :] = V
+
+  return V_3D
+end
+
+function convert_V_to_V3D(dev, nlevels, grid, V::Number)
+  T = eltype(grid)
+  A = device_array(dev)
+  V_3D = reshape(repeat([T(V)], outer=(grid.nx, 1)), (grid.nx, 1, nlevels))
+
+  return A(V_3D)
+end
+
+function Params(nlevels::Int, f₀, β, H₀, N², U, V, eta, topographic_gradient, r, cd, ν, nν, grid::TwoDGrid;
                 calcFq=nothingfunction, effort=FFTW.MEASURE)
   dev = grid.device
   T = eltype(grid)
@@ -237,10 +278,15 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   ξ = [cos((i - 1) * pi / (nlevels - 1)) for i in 1 : nlevels] # Chebyshev grid on [-1, 1]
   z = H₀ / 2 .* (ξ .- 1)                                       # maps [-1, 1] -> [-H₀, 0]
 
+  # Mean velocities and curvature
   U = convert_U_to_U3D(dev, nlevels, grid, U)
+  V = convert_V_to_V3D(dev, nlevels, grid, V)
 
-  Uyy = real.(ifft(-l.^2 .* fft(U[:, :, 2 : end - 1]))) # only calculate curvature of shear for interior PV part
+  Uyy = real.(ifft(-l.^2 .* fft(U[:, :, 2 : end - 1])))        # only calculate curvature of shear for interior PV part
   Uyy = CUDA.@allowscalar repeat(Uyy, outer=(nx, 1, 1))
+
+  Vxx = real.(irfft(-kr.^2 .* rfft(V[:, :, 2 : end - 1]), nx)) # only calculate curvature of shear for interior PV part
+  Vxx = CUDA.@allowscalar repeat(Vxx, outer=(1, ny, 1))
 
   # Calculate the periodic components of the bathymetry gradients
   eta = A(eta)
@@ -255,6 +301,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
 
   # Add everything to background buoyancy/PV gradients, except part coming from vertical shear   
   Qx = zeros(dev, T, (nx, ny, nlevels))
+  @views @. Qx[:, :, 2 : end - 1] = Vxx
   @views @. Qx[:, :, end] += N²[end] * etax
 
   Qy = zeros(dev, T, (nx, ny, nlevels))
@@ -272,8 +319,9 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   F = zeros(T, (nlevels, nlevels))
   calcF!(F, D, f₀, N²)
 
-  # Subtract the vertical shear part from background buoyancy/PV: i.e., Qy -= F*U
-  Qy .-= A(reshape(permutedims(F * permutedims(Array(U)[1, :, :], (2, 1)), (2, 1)), 1, ny, nlevels)) 
+  # Add the vertical shear components of background buoyancy/PV: Qx += F*V and Qy -= F*U 
+  Qx .+= A(reshape(permutedims(F * permutedims(Array(V)[:, 1, :], (2, 1)), (2, 1)), nx, 1, nlevels))
+  Qy .-= A(reshape(permutedims(F * permutedims(Array(U)[1, :, :], (2, 1)), (2, 1)), 1, ny, nlevels))
 
   # Compute PV inversion matrix
   typeofSkl = SArray{Tuple{nlevels, nlevels}, T, 2, nlevels^2} # StaticArrays of type T and dims = (nlevels, nlevels)
@@ -295,7 +343,7 @@ function Params(nlevels::Int, f₀, β, H₀, N², U, eta, topographic_gradient,
   M⁻¹ = A(M⁻¹)
   D = A(D)
 
-  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, eta, topographic_gradient, T(r), T(cd), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, M⁻¹, D, rfftplanlayered)
+  return Params(nlevels, T(f₀), T(β), T(H₀), Tuple(T.(N²)), U, V, eta, topographic_gradient, T(r), T(cd), T(ν), nν, calcFq, Tuple(T.(z)), Qx, Qy, S, S⁻¹, M⁻¹, D, rfftplanlayered)
 end
 
 numberoflevels(params) = params.nlevels
@@ -327,7 +375,7 @@ end
 """
     LinearEquation(params, grid)
 
-Return the equation for a multi-level quasi-geostrophic problem with `params` and `grid`.
+Return the equation for a 3D quasi-geostrophic problem with `params` and `grid`.
 The linear operator ``L`` includes only (hyper)-viscosity and is computed via
 `hyperviscosity(params, grid)`.
 
@@ -342,11 +390,11 @@ end
 """
     Equation(params, grid)
 
-Return the equation for a multi-level quasi-geostrophic problem with `params` and `grid`.
+Return the equation for a 3D quasi-geostrophic problem with `params` and `grid`.
 The linear operator ``L`` includes only (hyper)-viscosity and is computed via
 `hyperviscosity(params, grid)`.
 
-The nonlinear term is computed via [`calcN!`](@ref GeophysicalFlows.MultiLayerQG.calcN!).
+The nonlinear term is computed via [`calcN!`](@ref GeophysicalFlows.QG3D.calcN!).
 """
 function Equation(params, grid)
   L = hyperviscosity(params, grid)
@@ -362,7 +410,7 @@ end
 """
     struct Vars{Aphys, Atrans, F, P} <: AbstractVars
 
-The variables for multi-level QG problem.
+The variables for 3D QG problem.
 
 $(FIELDS)
 """
@@ -396,7 +444,7 @@ const StochasticForcedVars = Vars{<:AbstractArray, <:AbstractArray, <:AbstractAr
 """
     DecayingVars(grid, params)
 
-Return the variables for an unforced multi-level QG problem with `grid` and `params`.
+Return the variables for an unforced 3D QG problem with `grid` and `params`.
 """
 function DecayingVars(grid, params)
   Dev = typeof(grid.device)
@@ -412,7 +460,7 @@ end
 """
     ForcedVars(grid, params)
 
-Return the variables for a forced multi-level QG problem with `grid` and `params`.
+Return the variables for a forced 3D QG problem with `grid` and `params`.
 """
 function ForcedVars(grid, params)
   Dev = typeof(grid.device)
@@ -428,7 +476,7 @@ end
 """
     StochasticForcedVars(grid, params)
 
-Return the variables for a forced multi-level QG problem with `grid` and `params`.
+Return the variables for a stochastically forced 3D QG problem with `grid` and `params`.
 """
 function StochasticForcedVars(grid, params)
   Dev = typeof(grid.device)
@@ -639,7 +687,7 @@ end
 Compute the nonlinear term, that is the advection term, the bottom drag, and the forcing:
 
 ```math
-N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j}
+N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
  + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + δ_{j, n} D̂_j + F̂_j .
 ```
 """
@@ -660,8 +708,8 @@ end
 Compute the nonlinear term of the linearized equations:
 
 ```math
-N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} + \\widehat{(∂_y ψ_j)(∂_x Q_j)}
-- \\widehat{(∂_x ψ_j)(∂_y Q_j)} + + F̂_j + δ_{j, n} D̂_j .
+N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
++ \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} + + F̂_j + δ_{j, n} D̂_j .
 ```
 """
 function calcNlinear!(N, sol, t, clock, vars, params, grid)
@@ -679,7 +727,7 @@ end
 Compute the advection term and store it in `N`:
 
 ```math
-N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j}
+N_j = - \\widehat{𝖩(ψ_j, q_j)} - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y Q_j} - \\widehat{V_j ∂_y q_j}
  + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} .
 ```
 """
@@ -692,7 +740,7 @@ function calcN_advection!(N, sol, vars, params, grid)
   @. vars.vh =  im * grid.kr * vars.ψh
 
   invtransform!(vars.u, vars.uh, params)
-  @. vars.u += params.U                    # add the imposed zonal flow U (on upper boundary, in interior, and on lower boundary)
+  @. vars.u += params.U                    # add the imposed zonal flow U
 
   uQx, uQxh = vars.q, vars.uh              # use vars.q and vars.uh as scratch variables
   @. uQx = vars.u * params.Qx              # (U+u)*∂Q/∂x
@@ -700,23 +748,24 @@ function calcN_advection!(N, sol, vars, params, grid)
   @. N = - uQxh                            # -\hat{(U+u)*∂Q/∂x}
 
   invtransform!(vars.v, vars.vh, params)
+  @. vars.v += params.V                    # add the imposed meridional flow V
 
   vQy, vQyh = vars.q, vars.vh              # use vars.q and vars.vh as scratch variables
-  @. vQy = vars.v * params.Qy              # v*∂Q/∂y
+  @. vQy = vars.v * params.Qy              # (V+v)*∂Q/∂y
   fwdtransform!(vQyh, vQy, params)
-  @. N -= vQyh                             # -\hat{v*∂Q/∂y}
+  @. N -= vQyh                             # -\hat{(V+v)*∂Q/∂y}
 
   invtransform!(vars.q, vars.qh, params)
 
   uq, vq  = vars.u, vars.v                 # use vars.u and vars.v as scratch variables
   uqh, vqh = vars.uh, vars.vh              # use vars.uh and vars.vh as scratch variables
   @. uq *= vars.q                          # (U+u)*q
-  @. vq *= vars.q                          # v*q
+  @. vq *= vars.q                          # (V+v)*q
 
   fwdtransform!(uqh, uq, params)
   fwdtransform!(vqh, vq, params)
 
-  @. N -= im * grid.kr * uqh + im * grid.l * vqh    # -\hat{∂[(U+u)q]/∂x} - \hat{∂[vq]/∂y}
+  @. N -= im * grid.kr * uqh + im * grid.l * vqh    # -\hat{∂[(U+u)q]/∂x} - \hat{∂[(V+v)q]/∂y}
 
   return nothing
 end
@@ -727,8 +776,9 @@ end
 Compute the advection term of the linearized equations and store it in `N`:
 
 ```math
-N_j = - \\widehat{U_j ∂_x Q_j} - \\widehat{U_j ∂_x q_j}
- + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)} .
+N_j = + \\widehat{(∂_y ψ_j)(∂_x Q_j)} - \\widehat{(∂_x ψ_j)(∂_y Q_j)}
+      - \\widehat{U_j ∂_x Q_j} - \\widehat{V_j ∂_y Q_j}
+      - \\widehat{U_j ∂_x q_j} - \\widehat{V_j ∂_y q_j} .
 ```
 """
 function calcN_linearadvection!(N, sol, vars, params, grid)
@@ -743,27 +793,31 @@ function calcN_linearadvection!(N, sol, vars, params, grid)
 
   @. vars.u += params.U                    # add the imposed zonal flow U
   uQx, uQxh = vars.q, vars.uh              # use vars.q and vars.uh as scratch variables
-  @. uQx  = vars.u * params.Qx             # (U+u)*∂Q/∂x
+  @. uQx = vars.u * params.Qx              # (U+u)*∂Q/∂x
   fwdtransform!(uQxh, uQx, params)
   @. N = - uQxh                            # -\hat{(U+u)*∂Q/∂x}
 
   invtransform!(vars.v, vars.vh, params)
 
+  @. vars.v += params.V                    # add the imposed meridional flow V
   vQy, vQyh = vars.q, vars.vh              # use vars.q and vars.vh as scratch variables
-
-  @. vQy = vars.v * params.Qy              # v*∂Q/∂y
+  @. vQy = vars.v * params.Qy              # (V+v)*∂Q/∂y
   fwdtransform!(vQyh, vQy, params)
-  @. N -= vQyh                             # -\hat{v*∂Q/∂y}
+  @. N -= vQyh                             # -\hat{(V+v)*∂Q/∂y}
 
   invtransform!(vars.q, vars.qh, params)
 
   @. vars.u  = params.U
   Uq, Uqh  = vars.u, vars.uh               # use vars.u and vars.uh as scratch variables
   @. Uq *= vars.q                          # U*q
-
   fwdtransform!(Uqh, Uq, params)
-
   @. N -= im * grid.kr * Uqh               # -\hat{∂[U*q]/∂x}
+
+  @. vars.v  = params.V
+  Vq, Vqh  = vars.v, vars.vh               # use vars.v and vars.vh as scratch variables
+  @. Vq *= vars.q                          # V*q
+  fwdtransform!(Vqh, Vq, params)
+  @. N -= im * grid.l * Vqh                # -\hat{∂[V*q]/∂y}
 
   return nothing
 end
@@ -1010,9 +1064,9 @@ function omegaeqn!(wh, prob)
   @. vars.uh = -im * grid.l  * vars.ψh
   @. vars.vh =  im * grid.kr * vars.ψh
 
-  b = vars.q      # use vars.q as scratch variable
+  b = similar(vars.q)
   bfromstreamfunction!(b, vars.ψ, params, grid)
-  bh = vars.qh    # use vars.qh as scratch variable
+  bh = similar(vars.qh)
   fwdtransform!(bh, b, params)
 
   ### RHS
@@ -1054,9 +1108,13 @@ function omegaeqn!(wh, prob)
   fwdtransform!(Qh, Q1 .* Q2, params)                         # \hat(∂yv ∂yb)
   @views rhsh[:, :, 2 : end - 1] .+= -2 * im * grid.l .* Qh[:, :, 2 : end - 1]
 
-  # Mean flow part
+  # Mean flow U
   ∂zU = reshape(reshape(params.U, nl, nlevels) * params.D', 1, nl, nlevels)[:, :, 2 : end - 1]
   @views rhsh[:, :, 2 : end - 1] .+= -2 * params.f₀ * ∂zU .* grid.Krsq .* vars.vh[:, :, 2 : end - 1]
+
+  # Mean flow V
+  #∂zU = reshape(reshape(params.U, nl, nlevels) * params.D', 1, nl, nlevels)[:, :, 2 : end - 1]
+  #@views rhsh[:, :, 2 : end - 1] .+= -2 * params.f₀ * ∂zU .* grid.Krsq .* vars.vh[:, :, 2 : end - 1]
 
   return omegaeqn!(wh, rhsh, params, grid)
 end
